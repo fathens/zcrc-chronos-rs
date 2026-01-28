@@ -38,12 +38,14 @@ impl ForecastModel for EtsModel {
             ));
         }
 
-        let (season_len, spec) = match self.season_length {
-            Some(s) if s > 1 => (s, "ZZZ"),
-            _ => (1, "ZZN"),
-        };
+        // augurs 0.7 ETS does not yet support the seasonal component ("ZZZ").
+        // Always use "ZZN" (non-seasonal) to avoid panics.
+        // Seasonal handling is delegated to the MSTL model.
+        let spec = "ZZN";
+        let season_len = 1;
 
         debug!(
+            requested_season_length = ?self.season_length,
             season_length = season_len,
             spec = spec,
             horizon = horizon,
