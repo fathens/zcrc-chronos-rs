@@ -1,1 +1,3 @@
-// Placeholder — will be implemented after chronos-analyzer.
+mod selector;
+
+pub use selector::AdaptiveModelSelector;
