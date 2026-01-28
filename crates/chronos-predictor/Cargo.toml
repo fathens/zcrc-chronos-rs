@@ -18,3 +18,8 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 approx = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+chronos-normalize = { workspace = true }
+chronos-analyzer = { workspace = true }
+chronos-selector = { workspace = true }

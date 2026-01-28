@@ -144,11 +144,12 @@ impl TimeSeriesAnalyzer {
         }
 
         let positive_power = &power[1..half];
-        let max_power = positive_power
+        // Python uses np.max(power) * 0.1 — the max over the ENTIRE spectrum (including DC)
+        let max_power_all = power
             .iter()
             .cloned()
             .fold(f64::NEG_INFINITY, f64::max);
-        let threshold = max_power * 0.1;
+        let threshold = max_power_all * 0.1;
 
         // Find peaks above threshold
         let peaks: Vec<usize> = find_peaks(positive_power, threshold);
@@ -177,8 +178,9 @@ impl TimeSeriesAnalyzer {
 
         // Frequency = index / n
         let freq = main_freq_idx as f64 / n as f64;
+        // Python uses int() which truncates toward zero, matching floor for positive values
         let period = if freq != 0.0 {
-            Some((1.0 / freq).round() as usize)
+            Some((1.0 / freq) as usize)
         } else {
             None
         };
