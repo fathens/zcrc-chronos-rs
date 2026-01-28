@@ -38,7 +38,7 @@ fn test_hierarchical_basic() {
     let strategy = make_strategy();
 
     let (forecast, metadata) = trainer
-        .train_hierarchically(&values, &ts, &strategy, 60.0, 5)
+        .train_hierarchically(&values, &ts, &strategy, 60.0, 5, None)
         .unwrap();
 
     assert_eq!(forecast.mean.len(), 5);
@@ -54,7 +54,7 @@ fn test_hierarchical_constant_data() {
     let strategy = make_strategy();
 
     let (forecast, _) = trainer
-        .train_hierarchically(&values, &ts, &strategy, 30.0, 3)
+        .train_hierarchically(&values, &ts, &strategy, 30.0, 3, None)
         .unwrap();
 
     assert_eq!(forecast.mean.len(), 3);
@@ -123,9 +123,9 @@ fn test_early_stopping() {
 #[test]
 fn test_create_model_known() {
     let vals = vec![1.0; 10];
-    assert!(create_model("SeasonalNaive", &vals).is_some());
-    assert!(create_model("ETS", &vals).is_some());
-    assert!(create_model("Theta", &vals).is_some());
-    assert!(create_model("NPTS", &vals).is_some());
-    assert!(create_model("UnknownModel", &vals).is_none());
+    assert!(create_model("SeasonalNaive", &vals, None).is_some());
+    assert!(create_model("ETS", &vals, None).is_some());
+    assert!(create_model("Theta", &vals, None).is_some());
+    assert!(create_model("NPTS", &vals, None).is_some());
+    assert!(create_model("UnknownModel", &vals, None).is_none());
 }

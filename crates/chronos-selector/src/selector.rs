@@ -40,12 +40,23 @@ impl AdaptiveModelSelector {
         _horizon: usize,
         time_budget: u64,
     ) -> ModelSelectionStrategy {
+        let characteristics = self.analyzer.analyze(values, timestamps);
+        self.select_strategy_from_characteristics(&characteristics, values.len(), time_budget)
+    }
+
+    /// Select optimal strategy from pre-computed characteristics.
+    ///
+    /// Use this when the caller already has `TimeSeriesCharacteristics`
+    /// (e.g. to avoid running the analyzer twice).
+    pub fn select_strategy_from_characteristics(
+        &self,
+        characteristics: &TimeSeriesCharacteristics,
+        data_size: usize,
+        time_budget: u64,
+    ) -> ModelSelectionStrategy {
         info!("Selecting optimal strategy based on data characteristics");
 
-        let characteristics = self.analyzer.analyze(values, timestamps);
-        let data_size = values.len();
-
-        let strategy = self.determine_strategy(&characteristics, data_size, time_budget);
+        let strategy = self.determine_strategy(characteristics, data_size, time_budget);
 
         info!(
             strategy = %strategy.strategy_name,

@@ -1,4 +1,5 @@
 use chrono::NaiveDateTime;
+use chronos_analyzer::TimeSeriesAnalyzer;
 use chronos_core::{decimals_to_f64s, f64s_to_decimals, BigDecimal, ChronosError, Result};
 use chronos_normalize::normalize_time_series_data;
 use chronos_selector::AdaptiveModelSelector;
@@ -73,12 +74,17 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
     let (norm_timestamps, norm_values) =
         normalize_time_series_data(&input.timestamps, &f64_values)?;
 
-    // Step 2: Select strategy
+    // Step 2: Analyze characteristics (run once, share with selector and trainer)
+    let analyzer = TimeSeriesAnalyzer::new();
+    let characteristics = analyzer.analyze(&norm_values, &norm_timestamps);
+    let season_period = characteristics.seasonality.period;
+
+    // Step 3: Select strategy from pre-computed characteristics
     let selector = AdaptiveModelSelector::default();
     let strategy =
-        selector.select_optimal_strategy(&norm_values, &norm_timestamps, input.horizon, time_budget as u64);
+        selector.select_strategy_from_characteristics(&characteristics, norm_values.len(), time_budget as u64);
 
-    // Step 3: Hierarchical training + ensemble
+    // Step 4: Hierarchical training + ensemble (with detected season period)
     let mut trainer = HierarchicalTrainer::default();
     let (forecast, metadata) = trainer.train_hierarchically(
         &norm_values,
@@ -86,6 +92,7 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
         &strategy,
         time_budget,
         input.horizon,
+        season_period,
     )?;
 
     let processing_time = start.elapsed().as_secs_f64();

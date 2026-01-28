@@ -32,6 +32,10 @@ impl HierarchicalTrainer {
     }
 
     /// Run hierarchical training and return the best ensemble forecast.
+    ///
+    /// `season_period` is the detected seasonal period (from the analyzer).
+    /// When provided, it is forwarded to models that support seasonality
+    /// (SeasonalNaive, ETS).
     pub fn train_hierarchically(
         &mut self,
         values: &[f64],
@@ -39,6 +43,7 @@ impl HierarchicalTrainer {
         strategy: &ModelSelectionStrategy,
         time_budget_secs: f64,
         horizon: usize,
+        season_period: Option<usize>,
     ) -> Result<(ForecastOutput, TrainingMetadata)> {
         info!("Starting hierarchical training");
 
@@ -80,7 +85,7 @@ impl HierarchicalTrainer {
 
             let stage_start = Instant::now();
             let stage_forecasts =
-                self.train_stage(values, timestamps, models, horizon, &strategy.excluded_models);
+                self.train_stage(values, timestamps, models, horizon, &strategy.excluded_models, season_period);
             let stage_time = stage_start.elapsed().as_secs_f64();
 
             for (forecast, score) in &stage_forecasts {
@@ -161,6 +166,7 @@ impl HierarchicalTrainer {
         model_names: &[String],
         horizon: usize,
         excluded_models: &[String],
+        season_period: Option<usize>,
     ) -> Vec<(ForecastOutput, f64)> {
         let mut results = Vec::new();
 
@@ -169,7 +175,7 @@ impl HierarchicalTrainer {
                 continue;
             }
 
-            let mut model: Box<dyn ForecastModel> = match create_model(model_name, values) {
+            let mut model: Box<dyn ForecastModel> = match create_model(model_name, values, season_period) {
                 Some(m) => m,
                 None => {
                     debug!(model = %model_name, "Unknown model, skipping");
@@ -291,10 +297,12 @@ fn calculate_time_allocation(
 }
 
 /// Create a model instance by name.
-fn create_model(name: &str, _values: &[f64]) -> Option<Box<dyn ForecastModel>> {
+///
+/// `season_period` is forwarded to models that support seasonality.
+fn create_model(name: &str, _values: &[f64], season_period: Option<usize>) -> Option<Box<dyn ForecastModel>> {
     match name {
-        "SeasonalNaive" => Some(Box::new(SeasonalNaiveModel::new(None))),
-        "AutoETS" | "ETS" => Some(Box::new(EtsModel::new(None))),
+        "SeasonalNaive" => Some(Box::new(SeasonalNaiveModel::new(season_period))),
+        "AutoETS" | "ETS" => Some(Box::new(EtsModel::new(season_period))),
         "Theta" | "DynamicOptimizedTheta" => Some(Box::new(ThetaModel::new())),
         "NPTS" => Some(Box::new(NptsModel::default())),
         // Models not yet implemented return None

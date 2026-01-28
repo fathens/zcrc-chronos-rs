@@ -131,6 +131,7 @@ fn run_ensemble_pipeline(fixture: &TimeSeriesFixture) -> Option<ForecastOutput> 
         &strategy,
         60.0,
         fixture.horizon,
+        fixture.expected_characteristics.seasonal_period,
     ) {
         Ok((forecast, _metadata)) => Some(forecast),
         Err(e) => {
