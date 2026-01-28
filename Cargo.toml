@@ -8,6 +8,7 @@ members = [
     "crates/chronos-models",
     "crates/chronos-trainer",
     "crates/chronos-predictor",
+    "crates/chronos-bench",
 ]
 
 [workspace.package]
@@ -24,6 +25,7 @@ chronos-selector = { path = "crates/chronos-selector" }
 chronos-models = { path = "crates/chronos-models" }
 chronos-trainer = { path = "crates/chronos-trainer" }
 chronos-predictor = { path = "crates/chronos-predictor" }
+chronos-bench = { path = "crates/chronos-bench" }
 
 # Date/Time
 chrono = { version = "0.4", features = ["serde"] }
