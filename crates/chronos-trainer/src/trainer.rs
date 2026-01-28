@@ -159,6 +159,11 @@ impl HierarchicalTrainer {
     }
 
     /// Train all models in a stage, returning forecasts with scores.
+    ///
+    /// For each model, scoring uses holdout cross-validation: the last
+    /// `holdout_len` points are withheld, the model is trained on the
+    /// remainder, and its forecast is compared to the held-out values.
+    /// The final forecast is then produced from the full data.
     fn train_stage(
         &self,
         values: &[f64],
@@ -170,11 +175,31 @@ impl HierarchicalTrainer {
     ) -> Vec<(ForecastOutput, f64)> {
         let mut results = Vec::new();
 
+        let n = values.len();
+        // Holdout size: same as forecast horizon, but capped to leave enough training data
+        let min_train = 10;
+        let holdout_len = horizon.min(n.saturating_sub(min_train)).max(1);
+        let can_holdout = n > min_train + holdout_len;
+
         for model_name in model_names {
             if excluded_models.contains(model_name) {
                 continue;
             }
 
+            // Score via holdout CV
+            let score = if can_holdout {
+                evaluate_holdout(
+                    values,
+                    timestamps,
+                    model_name,
+                    holdout_len,
+                    season_period,
+                )
+            } else {
+                1.0 // insufficient data for holdout; neutral score
+            };
+
+            // Full-data forecast
             let mut model: Box<dyn ForecastModel> = match create_model(model_name, values, season_period) {
                 Some(m) => m,
                 None => {
@@ -185,7 +210,6 @@ impl HierarchicalTrainer {
 
             match model.fit_predict(values, timestamps, horizon) {
                 Ok(forecast) => {
-                    let score = evaluate_forecast(values, &forecast);
                     debug!(
                         model = %model_name,
                         score = format!("{:.4}", score),
@@ -313,34 +337,55 @@ fn create_model(name: &str, _values: &[f64], season_period: Option<usize>) -> Op
     }
 }
 
-/// Evaluate forecast quality using a simple metric.
-/// Uses coefficient of variation of the predictions relative to the input data.
-fn evaluate_forecast(values: &[f64], forecast: &ForecastOutput) -> f64 {
-    if forecast.mean.is_empty() || values.is_empty() {
-        return 1.0;
-    }
-
-    // Use the last N values as a rough "expected" range
+/// Evaluate a model via holdout cross-validation.
+///
+/// Withholds the last `holdout_len` values, trains the model on the
+/// remainder, predicts `holdout_len` steps, and returns the MASE score
+/// against the held-out values. Lower is better; < 1.0 beats seasonal naive.
+fn evaluate_holdout(
+    values: &[f64],
+    timestamps: &[NaiveDateTime],
+    model_name: &str,
+    holdout_len: usize,
+    season_period: Option<usize>,
+) -> f64 {
     let n = values.len();
-    let recent = &values[n.saturating_sub(forecast.mean.len())..];
-    if recent.is_empty() {
-        return 1.0;
-    }
+    let split = n - holdout_len;
+    let train_values = &values[..split];
+    let train_timestamps = &timestamps[..split];
+    let actual = &values[split..];
 
-    // MAE between forecast and last-known values (naive benchmark)
-    let mae: f64 = forecast
-        .mean
-        .iter()
-        .zip(recent.iter().cycle())
-        .map(|(pred, actual)| (pred - actual).abs())
-        .sum::<f64>()
-        / forecast.mean.len() as f64;
+    let mut model: Box<dyn ForecastModel> = match create_model(model_name, train_values, season_period) {
+        Some(m) => m,
+        None => return 1.0,
+    };
 
-    let mean_abs = recent.iter().map(|v| v.abs()).sum::<f64>() / recent.len() as f64;
-    if mean_abs > 1e-8 {
-        mae / mean_abs
-    } else {
-        1.0
+    match model.fit_predict(train_values, train_timestamps, holdout_len) {
+        Ok(forecast) => {
+            let season = season_period.unwrap_or(1);
+            let score = chronos_core::metrics::mase(&forecast.mean, actual, train_values, season);
+            // Cap Inf (e.g. constant series where naive denominator is zero)
+            // to a large finite value so ensemble weighting still works.
+            if score.is_infinite() || score.is_nan() {
+                let mae = chronos_core::metrics::mae(&forecast.mean, actual);
+                if mae < 1e-10 {
+                    // Perfect fit on holdout: score = 0 (best possible)
+                    0.0
+                } else {
+                    // Fall back to normalized MAE
+                    let mean_abs = actual.iter().map(|v| v.abs()).sum::<f64>()
+                        / actual.len().max(1) as f64;
+                    if mean_abs > 1e-10 { mae / mean_abs } else { 1.0 }
+                }
+            } else {
+                score
+            }
+        }
+        Err(e) => {
+            debug!(model = model_name, error = %e, "Holdout evaluation failed");
+            // Large finite fallback so the model is down-weighted but doesn't break ensemble
+            100.0
+        }
     }
 }
 
