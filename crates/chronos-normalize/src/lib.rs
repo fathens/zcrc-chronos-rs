@@ -1,5 +1,6 @@
 use chrono::NaiveDateTime;
-use chronos_core::{ChronosError, Result};
+use bigdecimal::BigDecimal;
+use chronos_core::{decimals_to_f64s, f64s_to_decimals, ChronosError, Result};
 use tracing::info;
 
 /// Normalize irregular time-series data to uniform intervals while preserving
@@ -106,6 +107,20 @@ pub fn normalize_time_series_data(
     );
 
     Ok((new_timestamps, new_values))
+}
+
+/// Normalize irregular time-series data with `Decimal` values.
+///
+/// Delegates to `normalize_time_series_data` internally, converting between
+/// `Decimal` and `f64` at the boundaries.
+pub fn normalize_time_series_data_decimal(
+    timestamps: &[NaiveDateTime],
+    values: &[BigDecimal],
+) -> Result<(Vec<NaiveDateTime>, Vec<BigDecimal>)> {
+    let f64_values = decimals_to_f64s(values)?;
+    let (norm_ts, norm_vals) = normalize_time_series_data(timestamps, &f64_values)?;
+    let decimal_vals = f64s_to_decimals(&norm_vals)?;
+    Ok((norm_ts, decimal_vals))
 }
 
 /// For each target timestamp, find the nearest source timestamp and return its value.
