@@ -1,4 +1,5 @@
 mod ets;
+mod hw;
 mod mstl;
 mod npts;
 mod seasonal_naive;

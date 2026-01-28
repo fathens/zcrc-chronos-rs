@@ -133,12 +133,12 @@ fn test_pure_seasonal_accuracy() {
 
     let forecast = run_pipeline(train, horizon);
     let mase = compute_mase(&forecast, actual, train, period);
-    // Baseline: ensemble currently mixes seasonal and non-seasonal models.
-    // Non-seasonal models (ETS, Theta) predict ~mean, diluting the ensemble.
-    // Threshold will tighten as ensemble weighting improves.
+    // ETS now handles seasonality directly via Holt-Winters, but the
+    // ensemble still includes non-seasonal models (Theta, NPTS) that
+    // dilute accuracy. Threshold reflects ensemble-level performance.
     assert!(
-        mase < 8.0,
-        "Pure seasonal MASE = {mase:.3}, expected < 8.0"
+        mase < 7.0,
+        "Pure seasonal MASE = {mase:.3}, expected < 7.0"
     );
 }
 

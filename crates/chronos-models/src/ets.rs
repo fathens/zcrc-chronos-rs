@@ -3,10 +3,13 @@ use chrono::NaiveDateTime;
 use chronos_core::{ChronosError, ForecastModel, ForecastOutput, ModelCategory, Result};
 use tracing::debug;
 
+use crate::hw;
+
 /// ETS model wrapper around augurs AutoETS.
 ///
-/// Uses AutoETS with "ZZN" spec (auto error, auto trend, no seasonality)
-/// for non-seasonal data, or "ZZZ" when a season_length is provided.
+/// When `season_length > 1`, uses a custom Holt-Winters implementation
+/// that supports additive and multiplicative seasonality.
+/// Otherwise falls back to augurs AutoETS with "ZZN" (non-seasonal) spec.
 pub struct EtsModel {
     season_length: Option<usize>,
 }
@@ -38,9 +41,33 @@ impl ForecastModel for EtsModel {
             ));
         }
 
-        // augurs 0.7 ETS does not yet support the seasonal component ("ZZZ").
-        // Always use "ZZN" (non-seasonal) to avoid panics.
-        // Seasonal handling is delegated to the MSTL model.
+        // Seasonal ETS: delegate to Holt-Winters implementation
+        if let Some(season_len) = self.season_length.filter(|&s| s > 1) {
+            if values.len() < 2 * season_len {
+                return Err(ChronosError::InsufficientData(format!(
+                    "Seasonal ETS requires at least 2 full cycles ({} points), got {}",
+                    2 * season_len,
+                    values.len()
+                )));
+            }
+
+            debug!(
+                season_length = season_len,
+                horizon = horizon,
+                data_length = values.len(),
+                "ETS fitting (Holt-Winters seasonal)"
+            );
+
+            let result = hw::hw_fit_predict(values, season_len, horizon)?;
+            return Ok(ForecastOutput {
+                mean: result.mean,
+                lower_quantile: Some(result.lower),
+                upper_quantile: Some(result.upper),
+                model_name: "ETS".into(),
+            });
+        }
+
+        // Non-seasonal: use augurs AutoETS ("ZZN")
         let spec = "ZZN";
         let season_len = 1;
 
@@ -50,7 +77,7 @@ impl ForecastModel for EtsModel {
             spec = spec,
             horizon = horizon,
             data_length = values.len(),
-            "ETS fitting"
+            "ETS fitting (non-seasonal)"
         );
 
         let auto = augurs::ets::AutoETS::new(season_len, spec)
@@ -60,7 +87,6 @@ impl ForecastModel for EtsModel {
             .fit(values)
             .map_err(|e| ChronosError::ModelError(format!("ETS fit: {e}")))?;
 
-        // Predict with 90% confidence interval (matching Python's 0.1/0.9 quantiles)
         let forecast = fitted
             .predict(horizon, 0.80)
             .map_err(|e| ChronosError::ModelError(format!("ETS predict: {e}")))?;
@@ -78,54 +104,4 @@ impl ForecastModel for EtsModel {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::NaiveDate;
-
-    fn make_timestamps(n: usize) -> Vec<NaiveDateTime> {
-        let base = NaiveDate::from_ymd_opt(2024, 1, 1)
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap();
-        (0..n)
-            .map(|i| base + chrono::Duration::hours(i as i64))
-            .collect()
-    }
-
-    #[test]
-    fn test_ets_linear_trend() {
-        let mut model = EtsModel::new(None);
-        let values: Vec<f64> = (0..50).map(|i| 10.0 + i as f64 * 2.0).collect();
-        let ts = make_timestamps(50);
-        let output = model.fit_predict(&values, &ts, 5).unwrap();
-        assert_eq!(output.mean.len(), 5);
-        // Should predict increasing values
-        assert!(output.mean[0] > values.last().copied().unwrap_or(0.0) - 10.0);
-        assert!(output.lower_quantile.is_some());
-        assert!(output.upper_quantile.is_some());
-    }
-
-    #[test]
-    fn test_ets_insufficient_data() {
-        let mut model = EtsModel::new(None);
-        let result = model.fit_predict(&[1.0, 2.0], &make_timestamps(2), 3);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_ets_constant_series() {
-        let mut model = EtsModel::new(None);
-        let values = vec![100.0; 30];
-        let ts = make_timestamps(30);
-        let output = model.fit_predict(&values, &ts, 5).unwrap();
-        assert_eq!(output.mean.len(), 5);
-        // Constant series → predictions should be near 100
-        for v in &output.mean {
-            assert!(
-                (*v - 100.0).abs() < 10.0,
-                "Expected ~100, got {}",
-                v
-            );
-        }
-    }
-}
+mod tests;
