@@ -6,7 +6,7 @@ use chronos_core::{
     ChronosError, ForecastModel, ForecastOutput, ModelSelectionStrategy,
     ModelTrainingResult, Result, TimeAllocation,
 };
-use chronos_models::{EtsModel, NptsModel, SeasonalNaiveModel, ThetaModel};
+use chronos_models::{EtsModel, MstlEtsModel, NptsModel, SeasonalNaiveModel, ThetaModel};
 use chronos_selector::AdaptiveModelSelector;
 use tracing::{debug, info, warn};
 
@@ -328,6 +328,10 @@ fn create_model(name: &str, _values: &[f64], season_period: Option<usize>) -> Op
         "SeasonalNaive" => Some(Box::new(SeasonalNaiveModel::new(season_period))),
         "AutoETS" | "ETS" => Some(Box::new(EtsModel::new(season_period))),
         "Theta" | "DynamicOptimizedTheta" => Some(Box::new(ThetaModel::new())),
+        "MSTL" => {
+            let periods = season_period.map(|p| vec![p]);
+            Some(Box::new(MstlEtsModel::new(periods)))
+        }
         "NPTS" => Some(Box::new(NptsModel::default())),
         // Models not yet implemented return None
         _ => {

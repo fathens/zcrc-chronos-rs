@@ -1,5 +1,5 @@
 use chronos_core::{ForecastModel, ForecastOutput};
-use chronos_models::{EtsModel, NptsModel, SeasonalNaiveModel, ThetaModel};
+use chronos_models::{EtsModel, MstlEtsModel, NptsModel, SeasonalNaiveModel, ThetaModel};
 use chronos_selector::AdaptiveModelSelector;
 use chronos_trainer::HierarchicalTrainer;
 use tracing::{debug, warn};
@@ -47,6 +47,16 @@ pub fn run_backtest(fixture: &TimeSeriesFixture) -> Vec<BacktestResult> {
         (
             "Theta",
             Box::new(|| Box::new(ThetaModel::new()) as Box<dyn ForecastModel>),
+        ),
+        (
+            "MSTL",
+            Box::new(move || {
+                let periods = fixture
+                    .expected_characteristics
+                    .seasonal_period
+                    .map(|p| vec![p]);
+                Box::new(MstlEtsModel::new(periods)) as Box<dyn ForecastModel>
+            }),
         ),
         (
             "NPTS",

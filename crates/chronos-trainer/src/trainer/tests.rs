@@ -126,6 +126,7 @@ fn test_create_model_known() {
     assert!(create_model("SeasonalNaive", &vals, None).is_some());
     assert!(create_model("ETS", &vals, None).is_some());
     assert!(create_model("Theta", &vals, None).is_some());
+    assert!(create_model("MSTL", &vals, None).is_some());
     assert!(create_model("NPTS", &vals, None).is_some());
     assert!(create_model("UnknownModel", &vals, None).is_none());
 }
