@@ -1,5 +1,5 @@
 use chrono::NaiveDateTime;
-use chronos_core::{ChronosError, Result};
+use chronos_core::{decimals_to_f64s, f64s_to_decimals, BigDecimal, ChronosError, Result};
 use chronos_normalize::normalize_time_series_data;
 use chronos_selector::AdaptiveModelSelector;
 use chronos_trainer::HierarchicalTrainer;
@@ -10,7 +10,7 @@ use tracing::info;
 #[derive(Debug, Clone)]
 pub struct PredictionInput {
     pub timestamps: Vec<NaiveDateTime>,
-    pub values: Vec<f64>,
+    pub values: Vec<BigDecimal>,
     pub horizon: usize,
     pub time_budget_secs: Option<f64>,
 }
@@ -19,11 +19,11 @@ pub struct PredictionInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForecastResult {
     /// Point forecast values.
-    pub forecast_values: Vec<f64>,
+    pub forecast_values: Vec<BigDecimal>,
     /// Lower confidence bound (10th percentile).
-    pub lower_bound: Option<Vec<f64>>,
+    pub lower_bound: Option<Vec<BigDecimal>>,
     /// Upper confidence bound (90th percentile).
-    pub upper_bound: Option<Vec<f64>>,
+    pub upper_bound: Option<Vec<BigDecimal>>,
     /// Name of model(s) used.
     pub model_name: String,
     /// Strategy selected.
@@ -57,14 +57,8 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
         ));
     }
 
-    // Check for NaN / Inf
-    for (i, v) in input.values.iter().enumerate() {
-        if v.is_nan() || v.is_infinite() {
-            return Err(ChronosError::InvalidInput(format!(
-                "Invalid value at index {i}: {v}"
-            )));
-        }
-    }
+    // Convert Decimal → f64 at the boundary (NaN/Inf cannot exist in Decimal)
+    let f64_values = decimals_to_f64s(&input.values)?;
 
     let time_budget = input.time_budget_secs.unwrap_or(900.0);
 
@@ -77,7 +71,7 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
 
     // Step 1: Normalize
     let (norm_timestamps, norm_values) =
-        normalize_time_series_data(&input.timestamps, &input.values)?;
+        normalize_time_series_data(&input.timestamps, &f64_values)?;
 
     // Step 2: Select strategy
     let selector = AdaptiveModelSelector::default();
@@ -103,10 +97,17 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
         "Prediction pipeline complete"
     );
 
+    // Convert f64 → Decimal at the boundary
     Ok(ForecastResult {
-        forecast_values: forecast.mean,
-        lower_bound: forecast.lower_quantile,
-        upper_bound: forecast.upper_quantile,
+        forecast_values: f64s_to_decimals(&forecast.mean)?,
+        lower_bound: forecast
+            .lower_quantile
+            .map(|v| f64s_to_decimals(&v))
+            .transpose()?,
+        upper_bound: forecast
+            .upper_quantile
+            .map(|v| f64s_to_decimals(&v))
+            .transpose()?,
         model_name: forecast.model_name,
         strategy_name: strategy.strategy_name,
         processing_time_secs: processing_time,
