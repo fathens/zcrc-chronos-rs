@@ -1,1 +1,3 @@
-// Placeholder — Phase 4.
+mod trainer;
+
+pub use trainer::HierarchicalTrainer;
