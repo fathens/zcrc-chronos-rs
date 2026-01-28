@@ -1,0 +1,16 @@
+[package]
+name = "chronos-trainer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chronos-core = { workspace = true }
+chronos-models = { workspace = true }
+chronos-selector = { workspace = true }
+chrono = { workspace = true }
+rayon = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
