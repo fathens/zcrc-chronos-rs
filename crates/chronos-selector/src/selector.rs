@@ -173,7 +173,7 @@ impl AdaptiveModelSelector {
 
         for model in &strategy.priority_models {
             match model.as_str() {
-                "SeasonalNaive" | "AutoETS" | "ETS" | "Theta" => fast.push(model.clone()),
+                "SeasonalNaive" | "AutoETS" | "ETS" | "Theta" | "MSTL" => fast.push(model.clone()),
                 "RecursiveTabular" | "DirectTabular" | "NPTS" | "ARIMA" => {
                     medium.push(model.clone())
                 }
@@ -244,6 +244,7 @@ fn initialize_strategies() -> HashMap<String, ModelSelectionStrategy> {
             priority_models: vec![
                 "SeasonalNaive".into(),
                 "AutoETS".into(),
+                "MSTL".into(),
                 "Theta".into(),
                 "NPTS".into(),
             ],
@@ -386,6 +387,7 @@ fn initialize_strategies() -> HashMap<String, ModelSelectionStrategy> {
             strategy_name: "balanced".into(),
             priority_models: vec![
                 "AutoETS".into(),
+                "MSTL".into(),
                 "RecursiveTabular".into(),
                 "NPTS".into(),
                 "SeasonalNaive".into(),
