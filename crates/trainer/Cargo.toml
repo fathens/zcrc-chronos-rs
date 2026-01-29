@@ -1,0 +1,16 @@
+[package]
+name = "trainer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+common = { workspace = true }
+models = { workspace = true }
+selector = { workspace = true }
+chrono = { workspace = true }
+rayon = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }

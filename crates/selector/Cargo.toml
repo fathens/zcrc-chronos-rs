@@ -1,0 +1,14 @@
+[package]
+name = "selector"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+common = { workspace = true }
+analyzer = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+serde_json = { workspace = true }
