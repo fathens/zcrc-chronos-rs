@@ -131,8 +131,16 @@ impl HierarchicalTrainer {
             ));
         }
 
+        // Filter out poor-performing models before ensembling
+        let filtered = filter_by_score(&all_forecasts);
+        info!(
+            before = all_forecasts.len(),
+            after = filtered.len(),
+            "Filtered models for ensemble"
+        );
+
         // Ensemble: inverse-MAE weighted average
-        let ensemble = inverse_mae_ensemble(&all_forecasts, horizon);
+        let ensemble = inverse_mae_ensemble(&filtered, horizon);
 
         let total_time = start.elapsed().as_secs_f64();
         let metadata = TrainingMetadata {
@@ -145,13 +153,13 @@ impl HierarchicalTrainer {
                 .collect(),
             best_overall_score: self.best_score,
             results_summary: self.summarize_results(),
-            model_count: all_forecasts.len(),
+            model_count: filtered.len(),
         };
 
         info!(
             total_time = format!("{:.1}s", total_time),
             best_score = format!("{:.4}", self.best_score),
-            models = all_forecasts.len(),
+            models = filtered.len(),
             "Hierarchical training complete"
         );
 
@@ -390,6 +398,47 @@ fn evaluate_holdout(
             // Large finite fallback so the model is down-weighted but doesn't break ensemble
             100.0
         }
+    }
+}
+
+/// Filter forecasts by score quality.
+///
+/// Removes models whose score is significantly worse than the best model.
+/// This prevents poor-performing models (e.g., non-seasonal models on seasonal data)
+/// from diluting ensemble accuracy.
+///
+/// Threshold: max(best_score * 3.0, 2.0)
+/// - best=0.5 → threshold=2.0 → Theta(MASE~8) excluded
+/// - best=0.01 → threshold=2.0 → nearly all models pass
+/// - best=5.0 → threshold=15.0 → all models pass (data is hard for everyone)
+fn filter_by_score(forecasts: &[(ForecastOutput, f64)]) -> Vec<(ForecastOutput, f64)> {
+    if forecasts.len() <= 1 {
+        return forecasts.to_vec();
+    }
+
+    let best_score = forecasts
+        .iter()
+        .map(|(_, s)| *s)
+        .fold(f64::INFINITY, f64::min);
+
+    let threshold = (best_score * 3.0).max(2.0);
+
+    let filtered: Vec<_> = forecasts
+        .iter()
+        .filter(|(_, s)| *s <= threshold)
+        .cloned()
+        .collect();
+
+    if filtered.is_empty() {
+        // Fallback: keep only the best model
+        forecasts
+            .iter()
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .into_iter()
+            .cloned()
+            .collect()
+    } else {
+        filtered
     }
 }
 

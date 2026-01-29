@@ -106,6 +106,7 @@ fn test_trend_plus_seasonal_accuracy() {
 
     let forecast = run_pipeline(train, horizon);
     let mase = compute_mase(&forecast, actual, train, period);
+    // Trend + seasonal with noise: ETS handles well, but ensemble may vary.
     assert!(
         mase < 2.0,
         "Trend+seasonal MASE = {mase:.3}, expected < 2.0"
@@ -133,12 +134,38 @@ fn test_pure_seasonal_accuracy() {
 
     let forecast = run_pipeline(train, horizon);
     let mase = compute_mase(&forecast, actual, train, period);
-    // ETS now handles seasonality directly via Holt-Winters, but the
-    // ensemble still includes non-seasonal models (Theta, NPTS) that
-    // dilute accuracy. Threshold reflects ensemble-level performance.
+    // Pure seasonal with noise: MASE depends on noise level and period detection.
+    // Threshold reflects realistic ensemble performance with filtering.
     assert!(
         mase < 7.0,
         "Pure seasonal MASE = {mase:.3}, expected < 7.0"
+    );
+}
+
+#[test]
+fn test_multi_seasonal_accuracy() {
+    let n = 200;
+    let horizon = 12;
+    let period = 12; // primary period for MASE scaling
+    let mut state: u64 = 33;
+    let full: Vec<f64> = (0..n + horizon)
+        .map(|i| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let noise = ((state >> 33) as f64) / (u32::MAX as f64) * 2.0 - 1.0;
+            500.0
+                + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin()
+                + 15.0 * (2.0 * std::f64::consts::PI * i as f64 / 24.0).sin()
+                + noise * 5.0
+        })
+        .collect();
+    let train = &full[..n];
+    let actual = &full[n..];
+
+    let forecast = run_pipeline(train, horizon);
+    let mase = compute_mase(&forecast, actual, train, period);
+    assert!(
+        mase < 3.0,
+        "Multi-seasonal MASE = {mase:.3}, expected < 3.0"
     );
 }
 
@@ -163,7 +190,7 @@ fn test_stationary_noise_accuracy() {
     let forecast = run_pipeline(train, horizon);
     let mase = compute_mase(&forecast, actual, train, 1);
     assert!(
-        mase < 1.5,
-        "Stationary noise MASE = {mase:.3}, expected < 1.5"
+        mase < 1.2,
+        "Stationary noise MASE = {mase:.3}, expected < 1.2"
     );
 }

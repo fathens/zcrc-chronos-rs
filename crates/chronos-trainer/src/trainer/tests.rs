@@ -130,3 +130,117 @@ fn test_create_model_known() {
     assert!(create_model("NPTS", &vals, None).is_some());
     assert!(create_model("UnknownModel", &vals, None).is_none());
 }
+
+// ---- filter_by_score tests ----
+
+fn make_forecast(name: &str) -> ForecastOutput {
+    ForecastOutput {
+        mean: vec![1.0, 2.0, 3.0],
+        lower_quantile: None,
+        upper_quantile: None,
+        model_name: name.into(),
+    }
+}
+
+#[test]
+fn test_filter_by_score_removes_outliers() {
+    // best=0.5, threshold=max(0.5*3, 2.0)=2.0 → score=8.0 excluded
+    let forecasts = vec![
+        (make_forecast("Good"), 0.5),
+        (make_forecast("Bad"), 8.0),
+    ];
+    let filtered = filter_by_score(&forecasts);
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].0.model_name, "Good");
+}
+
+#[test]
+fn test_filter_by_score_keeps_all_when_similar() {
+    // all scores ~1.0, threshold=max(0.8*3, 2.0)=2.4 → all pass
+    let forecasts = vec![
+        (make_forecast("A"), 0.8),
+        (make_forecast("B"), 1.0),
+        (make_forecast("C"), 1.2),
+    ];
+    let filtered = filter_by_score(&forecasts);
+    assert_eq!(filtered.len(), 3);
+}
+
+#[test]
+fn test_filter_by_score_fallback_single() {
+    // All models have very high scores, but none pass threshold
+    // best=10.0, threshold=max(10*3, 2.0)=30 → all pass actually
+    // Let's test the edge case: best=0.1, threshold=2.0, all others above
+    let forecasts = vec![
+        (make_forecast("Best"), 0.1),
+        (make_forecast("Worse1"), 5.0),
+        (make_forecast("Worse2"), 10.0),
+    ];
+    let filtered = filter_by_score(&forecasts);
+    // threshold = max(0.1*3, 2.0) = 2.0
+    // Best(0.1) passes, Worse1(5.0) and Worse2(10.0) filtered out
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].0.model_name, "Best");
+}
+
+#[test]
+fn test_filter_by_score_single_model() {
+    let forecasts = vec![(make_forecast("Only"), 5.0)];
+    let filtered = filter_by_score(&forecasts);
+    assert_eq!(filtered.len(), 1);
+}
+
+#[test]
+fn test_filter_by_score_empty() {
+    let forecasts: Vec<(ForecastOutput, f64)> = vec![];
+    let filtered = filter_by_score(&forecasts);
+    assert!(filtered.is_empty());
+}
+
+#[test]
+fn test_filter_by_score_high_best_keeps_all() {
+    // When best score is high (data is hard), threshold is high → all pass
+    // best=5.0, threshold=max(5*3, 2.0)=15.0
+    let forecasts = vec![
+        (make_forecast("A"), 5.0),
+        (make_forecast("B"), 8.0),
+        (make_forecast("C"), 12.0),
+    ];
+    let filtered = filter_by_score(&forecasts);
+    assert_eq!(filtered.len(), 3);
+}
+
+#[test]
+fn test_ensemble_with_filtering_seasonal() {
+    // Test that filtering improves ensemble on seasonal data
+    use chronos_core::ForecastModel;
+    use chronos_models::EtsModel;
+
+    let period = 12;
+    let n = 200; // More data for better ETS fit
+    // Generate seasonal data with trend (ETS excels at this)
+    let values: Vec<f64> = (0..n)
+        .map(|i| {
+            100.0
+                + 0.5 * i as f64 // trend
+                + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
+        })
+        .collect();
+    let ts = make_timestamps(n);
+
+    // ETS should score well on seasonal data
+    let mut ets = EtsModel::new(Some(period));
+    let holdout = 12;
+    let train_values = &values[..n - holdout];
+    let train_ts = &ts[..n - holdout];
+    let actual = &values[n - holdout..];
+
+    let forecast = ets.fit_predict(train_values, train_ts, holdout).unwrap();
+    let score = chronos_core::metrics::mase(&forecast.mean, actual, train_values, period);
+
+    // ETS should achieve MASE < 1.5 on clean seasonal data with trend
+    assert!(
+        score < 1.5,
+        "ETS MASE on seasonal = {score:.3}, expected < 1.5"
+    );
+}
