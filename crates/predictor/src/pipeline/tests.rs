@@ -52,11 +52,7 @@ fn test_predict_flat() {
     // Flat data → predictions near 42
     for v in &result.forecast_values {
         let f = v.to_f64().unwrap();
-        assert!(
-            (f - 42.0).abs() < 20.0,
-            "Expected ~42, got {}",
-            f
-        );
+        assert!((f - 42.0).abs() < 20.0, "Expected ~42, got {}", f);
     }
 }
 
@@ -64,9 +60,7 @@ fn test_predict_flat() {
 fn test_predict_seasonal() {
     let n = 120;
     let values: Vec<f64> = (0..n)
-        .map(|i| {
-            500.0 + (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin() * 50.0
-        })
+        .map(|i| 500.0 + (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin() * 50.0)
         .collect();
     let input = PredictionInput {
         timestamps: make_timestamps(n),
@@ -102,7 +96,7 @@ fn test_predict_validation_errors() {
     // Zero horizon
     let result = predict(&PredictionInput {
         timestamps: make_timestamps(10),
-        values: to_decimals(&vec![1.0; 10]),
+        values: to_decimals(&[1.0; 10]),
         horizon: 0,
         time_budget_secs: None,
     });

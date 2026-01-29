@@ -59,11 +59,7 @@ pub(crate) struct HwResult {
 // State initialization
 // ---------------------------------------------------------------------------
 
-fn initialize_state(
-    values: &[f64],
-    m: usize,
-    spec: HwSpec,
-) -> (f64, f64, Vec<f64>) {
+fn initialize_state(values: &[f64], m: usize, spec: HwSpec) -> (f64, f64, Vec<f64>) {
     // Level: mean of first season
     let level: f64 = values[..m].iter().sum::<f64>() / m as f64;
 
@@ -90,9 +86,7 @@ fn initialize_state(
     // Seasonal indices
     let seasonal = match spec.seasonal {
         SeasonalType::None => vec![0.0; m],
-        SeasonalType::Additive => {
-            values[..m].iter().map(|&v| v - level).collect()
-        }
+        SeasonalType::Additive => values[..m].iter().map(|&v| v - level).collect(),
         SeasonalType::Multiplicative => {
             if level.abs() < 1e-10 {
                 // Level near zero: fall back to additive-style init
@@ -110,12 +104,7 @@ fn initialize_state(
 // Holt-Winters update equations & fitting
 // ---------------------------------------------------------------------------
 
-fn fit_single(
-    values: &[f64],
-    m: usize,
-    spec: HwSpec,
-    params: &HwParams,
-) -> FittedHw {
+fn fit_single(values: &[f64], m: usize, spec: HwSpec, params: &HwParams) -> FittedHw {
     let n = values.len();
     let alpha = params.alpha;
     let beta = params.beta.unwrap_or(0.0);
@@ -154,15 +143,13 @@ fn fit_single(
                 alpha * values[t] + (1.0 - alpha) * (prev_level + phi * prev_trend)
             }
             SeasonalType::Additive => {
-                alpha * (values[t] - s_prev)
-                    + (1.0 - alpha) * (prev_level + phi * prev_trend)
+                alpha * (values[t] - s_prev) + (1.0 - alpha) * (prev_level + phi * prev_trend)
             }
             SeasonalType::Multiplicative => {
                 if s_prev.abs() < 1e-10 {
                     prev_level + phi * prev_trend
                 } else {
-                    alpha * (values[t] / s_prev)
-                        + (1.0 - alpha) * (prev_level + phi * prev_trend)
+                    alpha * (values[t] / s_prev) + (1.0 - alpha) * (prev_level + phi * prev_trend)
                 }
             }
         };
@@ -176,9 +163,7 @@ fn fit_single(
         // Update seasonal
         seasonal[t % m] = match spec.seasonal {
             SeasonalType::None => 0.0,
-            SeasonalType::Additive => {
-                gamma * (values[t] - level) + (1.0 - gamma) * s_prev
-            }
+            SeasonalType::Additive => gamma * (values[t] - level) + (1.0 - gamma) * s_prev,
             SeasonalType::Multiplicative => {
                 let base = prev_level + phi * prev_trend;
                 if base.abs() < 1e-10 {
@@ -311,7 +296,11 @@ where
     for _iter in 0..max_iter {
         // Sort by function value
         let mut indices: Vec<usize> = (0..n).collect();
-        indices.sort_by(|&a, &b| values[a].partial_cmp(&values[b]).unwrap_or(std::cmp::Ordering::Equal));
+        indices.sort_by(|&a, &b| {
+            values[a]
+                .partial_cmp(&values[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Check convergence: diameter of simplex
         let best = &simplex[indices[0]];
@@ -421,11 +410,7 @@ where
 // Parameter optimization
 // ---------------------------------------------------------------------------
 
-fn optimize_params(
-    values: &[f64],
-    m: usize,
-    spec: HwSpec,
-) -> HwParams {
+fn optimize_params(values: &[f64], m: usize, spec: HwSpec) -> HwParams {
     let has_trend = spec.trend != TrendType::None;
     let has_seasonal = spec.seasonal != SeasonalType::None;
     let has_damping = spec.trend == TrendType::AdditiveDamped;
@@ -545,8 +530,16 @@ fn compute_aicc(sse: f64, n: usize, spec: HwSpec, m: usize) -> f64 {
 }
 
 fn candidate_specs(has_negative: bool) -> Vec<HwSpec> {
-    let trends = [TrendType::None, TrendType::Additive, TrendType::AdditiveDamped];
-    let seasonals_all = [SeasonalType::None, SeasonalType::Additive, SeasonalType::Multiplicative];
+    let trends = [
+        TrendType::None,
+        TrendType::Additive,
+        TrendType::AdditiveDamped,
+    ];
+    let seasonals_all = [
+        SeasonalType::None,
+        SeasonalType::Additive,
+        SeasonalType::Multiplicative,
+    ];
     let seasonals_no_mult = [SeasonalType::None, SeasonalType::Additive];
 
     let mut specs = Vec::new();
@@ -626,9 +619,8 @@ pub(crate) fn hw_fit_predict(
         }
     }
 
-    let fitted = best_fitted.ok_or_else(|| {
-        ChronosError::ModelError("All Holt-Winters candidates failed".into())
-    })?;
+    let fitted = best_fitted
+        .ok_or_else(|| ChronosError::ModelError("All Holt-Winters candidates failed".into()))?;
 
     debug!(
         trend = ?fitted.spec.trend,

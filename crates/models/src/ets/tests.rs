@@ -76,11 +76,7 @@ fn test_ets_constant_series() {
     assert_eq!(output.mean.len(), 5);
     // Constant series → predictions should be near 100
     for v in &output.mean {
-        assert!(
-            (*v - 100.0).abs() < 10.0,
-            "Expected ~100, got {}",
-            v
-        );
+        assert!((*v - 100.0).abs() < 10.0, "Expected ~100, got {}", v);
     }
 }
 
@@ -89,9 +85,7 @@ fn test_ets_seasonal_additive() {
     let n = 120;
     let m = 12;
     let values: Vec<f64> = (0..n)
-        .map(|i| {
-            500.0 + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / m as f64).sin()
-        })
+        .map(|i| 500.0 + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / m as f64).sin())
         .collect();
     let ts = make_timestamps(n);
     let mut model = EtsModel::new(Some(m));
@@ -107,9 +101,7 @@ fn test_ets_seasonal_with_trend() {
     let m = 12;
     let values: Vec<f64> = (0..n)
         .map(|i| {
-            100.0
-                + 2.0 * i as f64
-                + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / m as f64).sin()
+            100.0 + 2.0 * i as f64 + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / m as f64).sin()
         })
         .collect();
     let ts = make_timestamps(n);
@@ -118,8 +110,7 @@ fn test_ets_seasonal_with_trend() {
     assert_eq!(output.mean.len(), 12);
     // Should forecast upward trend
     let last_train = values.last().copied().unwrap();
-    let forecast_mean: f64 =
-        output.mean.iter().sum::<f64>() / output.mean.len() as f64;
+    let forecast_mean: f64 = output.mean.iter().sum::<f64>() / output.mean.len() as f64;
     assert!(
         forecast_mean > last_train - 50.0,
         "Forecast mean ({:.1}) should be near or above last value ({:.1})",
@@ -149,11 +140,7 @@ fn test_ets_seasonal_mase_additive() {
     let horizon = 12;
     let noise = lcg_noise(77, n + horizon, 8.0);
     let full: Vec<f64> = (0..n + horizon)
-        .map(|i| {
-            500.0
-                + 50.0 * (2.0 * std::f64::consts::PI * i as f64 / m as f64).sin()
-                + noise[i]
-        })
+        .map(|i| 500.0 + 50.0 * (2.0 * std::f64::consts::PI * i as f64 / m as f64).sin() + noise[i])
         .collect();
     let train = &full[..n];
     let actual = &full[n..];
@@ -204,8 +191,7 @@ fn test_ets_seasonal_mase_multiplicative() {
     let full: Vec<f64> = (0..n + horizon)
         .map(|i| {
             let base = 500.0 + 0.5 * i as f64;
-            let ratio =
-                1.0 + 0.2 * (2.0 * std::f64::consts::PI * i as f64 / m as f64).sin();
+            let ratio = 1.0 + 0.2 * (2.0 * std::f64::consts::PI * i as f64 / m as f64).sin();
             base * ratio + noise[i]
         })
         .collect();

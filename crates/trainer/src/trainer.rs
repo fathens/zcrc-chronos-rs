@@ -3,8 +3,8 @@ use std::time::Instant;
 
 use chrono::NaiveDateTime;
 use common::{
-    ChronosError, ForecastModel, ForecastOutput, ModelSelectionStrategy,
-    ModelTrainingResult, Result, TimeAllocation,
+    ChronosError, ForecastModel, ForecastOutput, ModelSelectionStrategy, ModelTrainingResult,
+    Result, TimeAllocation,
 };
 use models::{EtsModel, MstlEtsModel, NptsModel, SeasonalNaiveModel, ThetaModel};
 use selector::AdaptiveModelSelector;
@@ -84,8 +84,14 @@ impl HierarchicalTrainer {
             );
 
             let stage_start = Instant::now();
-            let stage_forecasts =
-                self.train_stage(values, timestamps, models, horizon, &strategy.excluded_models, season_period);
+            let stage_forecasts = self.train_stage(
+                values,
+                timestamps,
+                models,
+                horizon,
+                &strategy.excluded_models,
+                season_period,
+            );
             let stage_time = stage_start.elapsed().as_secs_f64();
 
             for (forecast, score) in &stage_forecasts {
@@ -146,11 +152,7 @@ impl HierarchicalTrainer {
         let metadata = TrainingMetadata {
             total_training_time: total_time,
             strategy_used: strategy.strategy_name.clone(),
-            stages_completed: self
-                .training_results
-                .keys()
-                .cloned()
-                .collect(),
+            stages_completed: self.training_results.keys().cloned().collect(),
             best_overall_score: self.best_score,
             results_summary: self.summarize_results(),
             model_count: filtered.len(),
@@ -196,25 +198,20 @@ impl HierarchicalTrainer {
 
             // Score via holdout CV
             let score = if can_holdout {
-                evaluate_holdout(
-                    values,
-                    timestamps,
-                    model_name,
-                    holdout_len,
-                    season_period,
-                )
+                evaluate_holdout(values, timestamps, model_name, holdout_len, season_period)
             } else {
                 1.0 // insufficient data for holdout; neutral score
             };
 
             // Full-data forecast
-            let mut model: Box<dyn ForecastModel> = match create_model(model_name, values, season_period) {
-                Some(m) => m,
-                None => {
-                    debug!(model = %model_name, "Unknown model, skipping");
-                    continue;
-                }
-            };
+            let mut model: Box<dyn ForecastModel> =
+                match create_model(model_name, values, season_period) {
+                    Some(m) => m,
+                    None => {
+                        debug!(model = %model_name, "Unknown model, skipping");
+                        continue;
+                    }
+                };
 
             match model.fit_predict(values, timestamps, horizon) {
                 Ok(forecast) => {
@@ -331,7 +328,11 @@ fn calculate_time_allocation(
 /// Create a model instance by name.
 ///
 /// `season_period` is forwarded to models that support seasonality.
-fn create_model(name: &str, _values: &[f64], season_period: Option<usize>) -> Option<Box<dyn ForecastModel>> {
+fn create_model(
+    name: &str,
+    _values: &[f64],
+    season_period: Option<usize>,
+) -> Option<Box<dyn ForecastModel>> {
     match name {
         "SeasonalNaive" => Some(Box::new(SeasonalNaiveModel::new(season_period))),
         "AutoETS" | "ETS" => Some(Box::new(EtsModel::new(season_period))),
@@ -367,10 +368,11 @@ fn evaluate_holdout(
     let train_timestamps = &timestamps[..split];
     let actual = &values[split..];
 
-    let mut model: Box<dyn ForecastModel> = match create_model(model_name, train_values, season_period) {
-        Some(m) => m,
-        None => return 1.0,
-    };
+    let mut model: Box<dyn ForecastModel> =
+        match create_model(model_name, train_values, season_period) {
+            Some(m) => m,
+            None => return 1.0,
+        };
 
     match model.fit_predict(train_values, train_timestamps, holdout_len) {
         Ok(forecast) => {
@@ -385,9 +387,13 @@ fn evaluate_holdout(
                     0.0
                 } else {
                     // Fall back to normalized MAE
-                    let mean_abs = actual.iter().map(|v| v.abs()).sum::<f64>()
-                        / actual.len().max(1) as f64;
-                    if mean_abs > 1e-10 { mae / mean_abs } else { 1.0 }
+                    let mean_abs =
+                        actual.iter().map(|v| v.abs()).sum::<f64>() / actual.len().max(1) as f64;
+                    if mean_abs > 1e-10 {
+                        mae / mean_abs
+                    } else {
+                        1.0
+                    }
                 }
             } else {
                 score
@@ -476,7 +482,10 @@ fn inverse_mae_ensemble(forecasts: &[(ForecastOutput, f64)], horizon: usize) -> 
         }
     }
 
-    let model_names: Vec<&str> = forecasts.iter().map(|(f, _)| f.model_name.as_str()).collect();
+    let model_names: Vec<&str> = forecasts
+        .iter()
+        .map(|(f, _)| f.model_name.as_str())
+        .collect();
 
     ForecastOutput {
         mean,

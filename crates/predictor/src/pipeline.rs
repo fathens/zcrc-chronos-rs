@@ -1,11 +1,11 @@
-use chrono::NaiveDateTime;
 use analyzer::TimeSeriesAnalyzer;
+use chrono::NaiveDateTime;
 use common::{decimals_to_f64s, f64s_to_decimals, BigDecimal, ChronosError, Result};
 use normalize::normalize_time_series_data;
 use selector::AdaptiveModelSelector;
-use trainer::HierarchicalTrainer;
 use serde::{Deserialize, Serialize};
 use tracing::info;
+use trainer::HierarchicalTrainer;
 
 /// Input for the prediction pipeline.
 #[derive(Debug, Clone)]
@@ -91,8 +91,11 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
 
     // Step 3: Select strategy from pre-computed characteristics
     let selector = AdaptiveModelSelector::default();
-    let strategy =
-        selector.select_strategy_from_characteristics(&characteristics, train_values.len(), time_budget as u64);
+    let strategy = selector.select_strategy_from_characteristics(
+        &characteristics,
+        train_values.len(),
+        time_budget as u64,
+    );
 
     // Step 4: Hierarchical training + ensemble (with detected season period)
     let mut trainer = HierarchicalTrainer::default();
@@ -113,13 +116,17 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
     };
 
     let final_lower = if log_transformed {
-        forecast.lower_quantile.map(|v| v.iter().map(|x| x.exp()).collect())
+        forecast
+            .lower_quantile
+            .map(|v| v.iter().map(|x| x.exp()).collect())
     } else {
         forecast.lower_quantile
     };
 
     let final_upper = if log_transformed {
-        forecast.upper_quantile.map(|v| v.iter().map(|x| x.exp()).collect())
+        forecast
+            .upper_quantile
+            .map(|v| v.iter().map(|x| x.exp()).collect())
     } else {
         forecast.upper_quantile
     };
@@ -137,12 +144,8 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
     // Convert f64 → Decimal at the boundary
     Ok(ForecastResult {
         forecast_values: f64s_to_decimals(&final_mean)?,
-        lower_bound: final_lower
-            .map(|v| f64s_to_decimals(&v))
-            .transpose()?,
-        upper_bound: final_upper
-            .map(|v| f64s_to_decimals(&v))
-            .transpose()?,
+        lower_bound: final_lower.map(|v| f64s_to_decimals(&v)).transpose()?,
+        upper_bound: final_upper.map(|v| f64s_to_decimals(&v)).transpose()?,
         model_name: forecast.model_name,
         strategy_name: strategy.strategy_name,
         processing_time_secs: processing_time,

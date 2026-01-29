@@ -1,5 +1,5 @@
-use chrono::NaiveDateTime;
 use bigdecimal::BigDecimal;
+use chrono::NaiveDateTime;
 use common::{decimals_to_f64s, f64s_to_decimals, ChronosError, Result};
 use tracing::info;
 
@@ -60,7 +60,10 @@ pub fn normalize_time_series_data(
 
     // Already regular enough — skip normalization
     if cv < 0.1 {
-        info!(cv = cv, "Intervals are regular (CV < 0.1), skipping normalization");
+        info!(
+            cv = cv,
+            "Intervals are regular (CV < 0.1), skipping normalization"
+        );
         return Ok((timestamps.to_vec(), values.to_vec()));
     }
 
@@ -227,10 +230,10 @@ mod tests {
         // Irregular intervals: 60s, 300s, 60s, 600s → high CV
         let ts = vec![
             make_ts(10, 0, 0),
-            make_ts(10, 1, 0),   // +60s
-            make_ts(10, 6, 0),   // +300s
-            make_ts(10, 7, 0),   // +60s
-            make_ts(10, 17, 0),  // +600s
+            make_ts(10, 1, 0),  // +60s
+            make_ts(10, 6, 0),  // +300s
+            make_ts(10, 7, 0),  // +60s
+            make_ts(10, 17, 0), // +600s
         ];
         let vals = vec![100.0, 200.0, 150.0, 300.0, 50.0];
 
@@ -259,10 +262,10 @@ mod tests {
         // The normalization should not introduce values outside original range
         let ts = vec![
             make_ts(10, 0, 0),
-            make_ts(10, 0, 30),  // +30s
-            make_ts(10, 5, 0),   // +270s  (big gap)
-            make_ts(10, 5, 20),  // +20s
-            make_ts(10, 20, 0),  // +880s  (big gap)
+            make_ts(10, 0, 30), // +30s
+            make_ts(10, 5, 0),  // +270s  (big gap)
+            make_ts(10, 5, 20), // +20s
+            make_ts(10, 20, 0), // +880s  (big gap)
         ];
         let vals = vec![10.0, 50.0, 20.0, 80.0, 30.0];
 

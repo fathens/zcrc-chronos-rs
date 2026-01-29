@@ -1,5 +1,5 @@
 use chrono::NaiveDateTime;
-use common::{ForecastModel, ForecastOutput, ModelCategory, Result, ChronosError};
+use common::{ChronosError, ForecastModel, ForecastOutput, ModelCategory, Result};
 use tracing::debug;
 
 /// SeasonalNaive model: repeats the last seasonal cycle as forecast.
@@ -40,7 +40,11 @@ impl ForecastModel for SeasonalNaiveModel {
         let n = values.len();
         let period = self.season_length.unwrap_or(n).min(n);
 
-        debug!(period = period, horizon = horizon, "SeasonalNaive forecasting");
+        debug!(
+            period = period,
+            horizon = horizon,
+            "SeasonalNaive forecasting"
+        );
 
         // Take the last `period` values and cycle them
         let last_cycle = &values[n.saturating_sub(period)..];

@@ -2,10 +2,7 @@ use super::*;
 
 fn make_seasonal_additive(n: usize, m: usize) -> Vec<f64> {
     (0..n)
-        .map(|i| {
-            500.0
-                + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / m as f64).sin()
-        })
+        .map(|i| 500.0 + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / m as f64).sin())
         .collect()
 }
 
@@ -13,7 +10,8 @@ fn make_seasonal_multiplicative(n: usize, m: usize) -> Vec<f64> {
     (0..n)
         .map(|i| {
             let base = 500.0;
-            let seasonal_ratio = 1.0 + 0.3 * (2.0 * std::f64::consts::PI * i as f64 / m as f64).sin();
+            let seasonal_ratio =
+                1.0 + 0.3 * (2.0 * std::f64::consts::PI * i as f64 / m as f64).sin();
             base * seasonal_ratio
         })
         .collect()
@@ -22,9 +20,7 @@ fn make_seasonal_multiplicative(n: usize, m: usize) -> Vec<f64> {
 fn make_trend_seasonal(n: usize, m: usize) -> Vec<f64> {
     (0..n)
         .map(|i| {
-            100.0
-                + 2.0 * i as f64
-                + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / m as f64).sin()
+            100.0 + 2.0 * i as f64 + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / m as f64).sin()
         })
         .collect()
 }
@@ -106,9 +102,8 @@ fn test_fit_additive_seasonal() {
 
     // Forecast should roughly follow the seasonal pattern
     for (i, &v) in result.mean.iter().enumerate() {
-        let expected = 500.0
-            + 30.0
-                * (2.0 * std::f64::consts::PI * (120 + i) as f64 / m as f64).sin();
+        let expected =
+            500.0 + 30.0 * (2.0 * std::f64::consts::PI * (120 + i) as f64 / m as f64).sin();
         assert!(
             (v - expected).abs() < 50.0,
             "h={}: forecast={:.1}, expected={:.1}",
@@ -128,11 +123,7 @@ fn test_fit_multiplicative_seasonal() {
 
     for &v in &result.mean {
         // Should be in a reasonable range around 500
-        assert!(
-            v > 200.0 && v < 800.0,
-            "forecast out of range: {:.1}",
-            v
-        );
+        assert!(v > 200.0 && v < 800.0, "forecast out of range: {:.1}", v);
     }
 }
 
@@ -234,11 +225,7 @@ fn test_constant_series() {
     let result = hw_fit_predict(&values, m, 4).unwrap();
     assert_eq!(result.mean.len(), 4);
     for &v in &result.mean {
-        assert!(
-            (v - 42.0).abs() < 5.0,
-            "Expected ~42, got {:.1}",
-            v
-        );
+        assert!((v - 42.0).abs() < 5.0, "Expected ~42, got {:.1}", v);
     }
 }
 

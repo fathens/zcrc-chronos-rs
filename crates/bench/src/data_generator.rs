@@ -119,9 +119,7 @@ pub fn trend_with_noise(n: usize, horizon: usize) -> TimeSeriesFixture {
 pub fn pure_seasonal(n: usize, horizon: usize) -> TimeSeriesFixture {
     let period = 12;
     let values: Vec<f64> = (0..n)
-        .map(|i| {
-            500.0 + 50.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
-        })
+        .map(|i| 500.0 + 50.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin())
         .collect();
     let (tv, te, tts, tte) = split(&values, horizon);
     TimeSeriesFixture {

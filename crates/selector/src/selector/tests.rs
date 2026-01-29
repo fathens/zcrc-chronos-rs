@@ -31,8 +31,7 @@ fn test_small_dataset_strategy() {
     let strategy = selector.select_optimal_strategy(&vals, &ts, 10, 900);
     // With flat data, no strong characteristics → should use base strategy
     assert!(
-        strategy.strategy_name.contains("small_dataset")
-            || strategy.strategy_name == "balanced"
+        strategy.strategy_name.contains("small_dataset") || strategy.strategy_name == "balanced"
     );
 }
 
@@ -163,14 +162,12 @@ fn test_all_strategies_include_key_fast_models() {
     let strategies = super::initialize_strategies();
 
     // Strategies that should include MSTL (may encounter seasonal data)
-    let strategies_needing_mstl = [
-        "strong_seasonal",
-        "small_dataset",
-        "balanced",
-    ];
+    let strategies_needing_mstl = ["strong_seasonal", "small_dataset", "balanced"];
 
     for name in strategies_needing_mstl {
-        let strategy = strategies.get(name).expect(&format!("Strategy {} not found", name));
+        let strategy = strategies
+            .get(name)
+            .unwrap_or_else(|| panic!("Strategy {} not found", name));
         assert!(
             strategy.priority_models.iter().any(|m| m == "MSTL"),
             "Strategy '{}' should include MSTL in priority_models",
