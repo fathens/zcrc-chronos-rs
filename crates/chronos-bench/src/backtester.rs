@@ -1,7 +1,6 @@
-use chronos_core::{ForecastModel, ForecastOutput};
+use chronos_core::{decimals_to_f64s, f64s_to_decimals, BigDecimal, ForecastModel, ForecastOutput};
 use chronos_models::{EtsModel, MstlEtsModel, NptsModel, SeasonalNaiveModel, ThetaModel};
-use chronos_selector::AdaptiveModelSelector;
-use chronos_trainer::HierarchicalTrainer;
+use chronos_predictor::{predict, PredictionInput};
 use tracing::{debug, warn};
 
 use crate::data_generator::TimeSeriesFixture;
@@ -126,24 +125,43 @@ fn run_single_model(
 }
 
 fn run_ensemble_pipeline(fixture: &TimeSeriesFixture) -> Option<ForecastOutput> {
-    let selector = AdaptiveModelSelector::default();
-    let strategy = selector.select_optimal_strategy(
-        &fixture.train_values,
-        &fixture.train_timestamps,
-        fixture.horizon,
-        60,
-    );
+    // Convert f64 to BigDecimal for predict() pipeline
+    let values: Vec<BigDecimal> = match f64s_to_decimals(&fixture.train_values) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, fixture = %fixture.name, "Failed to convert values");
+            return None;
+        }
+    };
 
-    let mut trainer = HierarchicalTrainer::default();
-    match trainer.train_hierarchically(
-        &fixture.train_values,
-        &fixture.train_timestamps,
-        &strategy,
-        60.0,
-        fixture.horizon,
-        fixture.expected_characteristics.seasonal_period,
-    ) {
-        Ok((forecast, _metadata)) => Some(forecast),
+    let input = PredictionInput {
+        timestamps: fixture.train_timestamps.clone(),
+        values,
+        horizon: fixture.horizon,
+        time_budget_secs: Some(60.0),
+    };
+
+    match predict(&input) {
+        Ok(result) => {
+            // Convert BigDecimal back to f64
+            let mean = match decimals_to_f64s(&result.forecast_values) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(error = %e, fixture = %fixture.name, "Failed to convert forecast");
+                    return None;
+                }
+            };
+
+            let lower_quantile = result.lower_bound.and_then(|lb| decimals_to_f64s(&lb).ok());
+            let upper_quantile = result.upper_bound.and_then(|ub| decimals_to_f64s(&ub).ok());
+
+            Some(ForecastOutput {
+                mean,
+                lower_quantile,
+                upper_quantile,
+                model_name: result.model_name,
+            })
+        }
         Err(e) => {
             warn!(error = %e, fixture = %fixture.name, "Ensemble pipeline failed");
             None

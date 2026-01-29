@@ -146,8 +146,12 @@ fn compute_mase(forecast: &[f64], actual: &[f64], train_values: &[f64], season: 
 
     let naive_mae = naive_errors.iter().sum::<f64>() / naive_errors.len() as f64;
 
-    if naive_mae < 1e-15 {
-        // Constant series – cannot scale
+    // If naive MAE is effectively zero (pure seasonal/constant data),
+    // MASE is undefined. Use a reasonable floor to avoid explosion.
+    // 1e-6 is chosen because smaller naive errors indicate near-perfect
+    // seasonal patterns where MASE comparison is meaningless.
+    if naive_mae < 1e-6 {
+        // Near-perfect seasonal/constant series – cannot scale meaningfully
         return f64::INFINITY;
     }
 

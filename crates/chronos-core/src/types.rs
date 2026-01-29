@@ -64,6 +64,9 @@ pub struct TrendInfo {
     pub r_squared: f64,
     pub p_value: f64,
     pub mann_kendall: MannKendallResult,
+    /// True if the trend appears exponential (log-linear fit is significantly better).
+    #[serde(default)]
+    pub is_exponential: bool,
 }
 
 impl Default for TrendInfo {
@@ -75,6 +78,7 @@ impl Default for TrendInfo {
             r_squared: 0.0,
             p_value: 1.0,
             mann_kendall: MannKendallResult::default(),
+            is_exponential: false,
         }
     }
 }

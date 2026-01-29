@@ -10,6 +10,7 @@ chronos-analyzer = { workspace = true }
 chronos-selector = { workspace = true }
 chronos-models = { workspace = true }
 chronos-trainer = { workspace = true }
+chronos-predictor = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 

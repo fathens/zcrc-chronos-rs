@@ -253,10 +253,14 @@ impl TimeSeriesAnalyzer {
 
         let mann_kendall = self.mann_kendall_test(values);
 
+        // Detect exponential growth: compare linear R² vs log-linear R²
+        let is_exponential = self.detect_exponential_trend(values, r_squared);
+
         debug!(
             strength = strength,
             direction = direction,
             r_squared = format!("{:.3}", r_squared),
+            is_exponential = is_exponential,
             "Trend analysis complete"
         );
 
@@ -267,7 +271,57 @@ impl TimeSeriesAnalyzer {
             r_squared,
             p_value,
             mann_kendall,
+            is_exponential,
         }
+    }
+
+    /// Detect if the trend is exponential by comparing linear vs log-linear fit.
+    ///
+    /// Returns true if:
+    /// 1. All values are positive (required for log transform)
+    /// 2. Log-linear R² is significantly better than linear R² (by at least 0.1)
+    /// 3. Log-linear R² is strong (> 0.8)
+    /// 4. There's a clear increasing trend
+    fn detect_exponential_trend(&self, values: &[f64], linear_r_squared: f64) -> bool {
+        let n = values.len();
+        if n < 10 {
+            return false;
+        }
+
+        // Check all values are positive (required for log)
+        let min_val = values.iter().cloned().fold(f64::INFINITY, f64::min);
+        if min_val <= 0.0 {
+            return false;
+        }
+
+        // Check for increasing trend (exponential decay is rare in forecasting context)
+        let first_quarter_mean = mean(&values[..n / 4]);
+        let last_quarter_mean = mean(&values[3 * n / 4..]);
+        if last_quarter_mean <= first_quarter_mean * 1.5 {
+            // Not enough growth to be exponential
+            return false;
+        }
+
+        // Compute log-linear fit: regress x against log(y)
+        let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let log_values: Vec<f64> = values.iter().map(|v| v.ln()).collect();
+
+        let (_, _, r_log, _, _) = linregress(&x, &log_values);
+        let log_r_squared = r_log * r_log;
+
+        // Exponential if log-linear fit is significantly better
+        let is_exp = log_r_squared > 0.8
+            && log_r_squared > linear_r_squared + 0.1;
+
+        if is_exp {
+            debug!(
+                linear_r2 = format!("{:.3}", linear_r_squared),
+                log_r2 = format!("{:.3}", log_r_squared),
+                "Exponential trend detected"
+            );
+        }
+
+        is_exp
     }
 
     // ---- Mann-Kendall Test ----
