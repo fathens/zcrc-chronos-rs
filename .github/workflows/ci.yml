@@ -34,6 +34,7 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: |
+          set -o pipefail
           if ! cargo fmt --all -- --check 2>&1 | tee fmt-output.txt; then
             echo "## Formatting Issues" >> $GITHUB_STEP_SUMMARY
             echo "Run \`cargo fmt --all\` to fix these issues:" >> $GITHUB_STEP_SUMMARY
@@ -53,11 +54,12 @@ jobs:
           components: clippy
       - name: Run clippy
         run: |
-          if ! cargo clippy --workspace --all-targets --message-format=short -- -D warnings 2>&1 | tee clippy-output.txt; then
+          set -o pipefail
+          if ! cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee clippy-output.txt; then
             echo "## Clippy Warnings" >> $GITHUB_STEP_SUMMARY
             echo "Run \`cargo clippy --workspace --fix --allow-dirty\` to fix auto-fixable issues:" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
-            grep -E "^(warning|error)" clippy-output.txt >> $GITHUB_STEP_SUMMARY || cat clippy-output.txt >> $GITHUB_STEP_SUMMARY
+            cat clippy-output.txt >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
