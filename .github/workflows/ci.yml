@@ -39,7 +39,7 @@ jobs:
             echo "## Formatting Issues" >> $GITHUB_STEP_SUMMARY
             echo "Run \`cargo fmt --all\` to fix these issues:" >> $GITHUB_STEP_SUMMARY
             echo '```diff' >> $GITHUB_STEP_SUMMARY
-            cat fmt-output.txt >> $GITHUB_STEP_SUMMARY
+            sed 's/\x1b\[[0-9;]*m//g' fmt-output.txt >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
@@ -59,7 +59,7 @@ jobs:
             echo "## Clippy Warnings" >> $GITHUB_STEP_SUMMARY
             echo "Run \`cargo clippy --workspace --fix --allow-dirty\` to fix auto-fixable issues:" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
-            cat clippy-output.txt >> $GITHUB_STEP_SUMMARY
+            sed 's/\x1b\[[0-9;]*m//g' clippy-output.txt >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
