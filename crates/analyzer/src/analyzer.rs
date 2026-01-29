@@ -145,10 +145,8 @@ impl TimeSeriesAnalyzer {
         }
 
         // Prepare FFT input: detrended values (already zero-mean after detrending)
-        let mut buffer: Vec<Complex<f64>> = detrended
-            .iter()
-            .map(|&v| Complex::new(v, 0.0))
-            .collect();
+        let mut buffer: Vec<Complex<f64>> =
+            detrended.iter().map(|&v| Complex::new(v, 0.0)).collect();
 
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(n);
@@ -170,10 +168,7 @@ impl TimeSeriesAnalyzer {
 
         let positive_power = &power[1..half];
         // Python uses np.max(power) * 0.1 — the max over the ENTIRE spectrum (including DC)
-        let max_power_all = power
-            .iter()
-            .cloned()
-            .fold(f64::NEG_INFINITY, f64::max);
+        let max_power_all = power.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let threshold = max_power_all * 0.1;
 
         // Find peaks above threshold
@@ -374,8 +369,7 @@ impl TimeSeriesAnalyzer {
             return false;
         }
 
-        let is_exp = log_r_squared > 0.99
-            && log_r_squared > linear_r_squared + 0.01;
+        let is_exp = log_r_squared > 0.99 && log_r_squared > linear_r_squared + 0.01;
 
         if is_exp {
             debug!(
@@ -466,7 +460,10 @@ impl TimeSeriesAnalyzer {
         }
 
         let volatility = std_dev(&diffs) / mean_val.abs();
-        debug!(volatility = format!("{:.4}", volatility), "Volatility calculated");
+        debug!(
+            volatility = format!("{:.4}", volatility),
+            "Volatility calculated"
+        );
         volatility
     }
 
@@ -616,7 +613,11 @@ impl TimeSeriesAnalyzer {
         };
         let is_regular = cv < 0.1;
 
-        debug!(regular = is_regular, cv = format!("{:.3}", cv), "Time interval analysis");
+        debug!(
+            regular = is_regular,
+            cv = format!("{:.3}", cv),
+            "Time interval analysis"
+        );
 
         DensityInfo {
             regular: is_regular,
@@ -754,7 +755,7 @@ fn median(data: &[f64]) -> f64 {
     let mut sorted = data.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]
@@ -820,11 +821,7 @@ fn linregress(x: &[f64], y: &[f64]) -> (f64, f64, f64, f64, f64) {
     let std_err = (mse / ss_x.max(1e-15)).sqrt();
 
     // p-value for t-test on slope
-    let t_stat = if std_err > 0.0 {
-        slope / std_err
-    } else {
-        0.0
-    };
+    let t_stat = if std_err > 0.0 { slope / std_err } else { 0.0 };
     let df = (n_int as f64 - 2.0).max(1.0);
     let p_value = t_test_p_value(t_stat, df);
 
@@ -950,7 +947,9 @@ mod tests {
         assert_eq!(vol2, 0.0); // constant diffs → zero volatility
 
         // Varying series → positive volatility
-        let vals3 = vec![100.0, 110.0, 95.0, 120.0, 80.0, 130.0, 90.0, 115.0, 85.0, 125.0];
+        let vals3 = vec![
+            100.0, 110.0, 95.0, 120.0, 80.0, 130.0, 90.0, 115.0, 85.0, 125.0,
+        ];
         let vol3 = analyzer.calculate_volatility(&vals3);
         assert!(vol3 > 0.0);
     }
@@ -1130,8 +1129,7 @@ mod tests {
             assert!(
                 chars.trend.is_exponential,
                 "exponential n={}: expected is_exponential=true, linear_r²={:.3}",
-                n,
-                chars.trend.r_squared
+                n, chars.trend.r_squared
             );
         }
     }

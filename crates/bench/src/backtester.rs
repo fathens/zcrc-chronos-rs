@@ -6,6 +6,8 @@ use tracing::{debug, warn};
 use crate::data_generator::TimeSeriesFixture;
 use crate::metrics::{self, MetricSet};
 
+type ModelFactory<'a> = Box<dyn FnOnce() -> Box<dyn ForecastModel> + 'a>;
+
 /// Result of running a single model on a single fixture.
 #[derive(Debug, Clone)]
 pub struct BacktestResult {
@@ -26,7 +28,7 @@ pub fn run_backtest(fixture: &TimeSeriesFixture) -> Vec<BacktestResult> {
     let mut results = Vec::new();
 
     // Individual models
-    let model_configs: Vec<(&str, Box<dyn FnOnce() -> Box<dyn ForecastModel>>)> = vec![
+    let model_configs: Vec<(&str, ModelFactory<'_>)> = vec![
         (
             "SeasonalNaive",
             Box::new(move || {

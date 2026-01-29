@@ -58,13 +58,16 @@ pub fn compute_metrics(
         .sqrt();
 
     // MAPE (skip zeros in actual to avoid Inf)
-    let (mape_sum, mape_count) = forecast.iter().zip(actual).fold((0.0, 0u64), |(s, c), (f, a)| {
-        if a.abs() > 1e-15 {
-            (s + ((f - a) / a).abs(), c + 1)
-        } else {
-            (s, c)
-        }
-    });
+    let (mape_sum, mape_count) = forecast
+        .iter()
+        .zip(actual)
+        .fold((0.0, 0u64), |(s, c), (f, a)| {
+            if a.abs() > 1e-15 {
+                (s + ((f - a) / a).abs(), c + 1)
+            } else {
+                (s, c)
+            }
+        });
     let mape = if mape_count > 0 {
         mape_sum / mape_count as f64 * 100.0
     } else {
@@ -94,7 +97,11 @@ pub fn compute_metrics(
     let mase = compute_mase(forecast, actual, train_values, season);
 
     // WAPE (= total |error| / total |actual|)
-    let abs_error_sum: f64 = forecast.iter().zip(actual).map(|(f, a)| (f - a).abs()).sum();
+    let abs_error_sum: f64 = forecast
+        .iter()
+        .zip(actual)
+        .map(|(f, a)| (f - a).abs())
+        .sum();
     let abs_actual_sum: f64 = actual.iter().map(|a| a.abs()).sum();
     let wape = if abs_actual_sum > 1e-15 {
         abs_error_sum / abs_actual_sum * 100.0

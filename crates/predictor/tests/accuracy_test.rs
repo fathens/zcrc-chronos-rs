@@ -78,10 +78,7 @@ fn test_pure_trend_accuracy() {
 
     let forecast = run_pipeline(train, horizon);
     let mase = compute_mase(&forecast, actual, train, 1);
-    assert!(
-        mase < 0.5,
-        "Pure trend MASE = {mase:.3}, expected < 0.5"
-    );
+    assert!(mase < 0.5, "Pure trend MASE = {mase:.3}, expected < 0.5");
 }
 
 #[test]
@@ -136,10 +133,7 @@ fn test_pure_seasonal_accuracy() {
     let mase = compute_mase(&forecast, actual, train, period);
     // Pure seasonal with noise: MASE depends on noise level and period detection.
     // Threshold reflects realistic ensemble performance with filtering.
-    assert!(
-        mase < 7.0,
-        "Pure seasonal MASE = {mase:.3}, expected < 7.0"
-    );
+    assert!(mase < 7.0, "Pure seasonal MASE = {mase:.3}, expected < 7.0");
 }
 
 #[test]

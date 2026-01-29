@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 
-use chrono::NaiveDateTime;
 use analyzer::TimeSeriesAnalyzer;
-use common::{
-    ModelSelectionStrategy, TimeAllocation, TimeSeriesCharacteristics,
-};
+use chrono::NaiveDateTime;
+use common::{ModelSelectionStrategy, TimeAllocation, TimeSeriesCharacteristics};
 use tracing::{debug, info};
 
 /// Port of Python's `AdaptiveModelSelector` class.
@@ -92,21 +90,13 @@ impl AdaptiveModelSelector {
         if characteristics.seasonality.strength == "strong"
             && characteristics.seasonality.score > 0.3
         {
-            strategy_scores.insert(
-                "strong_seasonal",
-                characteristics.seasonality.score * 2.0,
-            );
+            strategy_scores.insert("strong_seasonal", characteristics.seasonality.score * 2.0);
             debug!("Strong seasonality detected");
         }
 
         // Trend
-        if characteristics.trend.strength == "strong"
-            && characteristics.trend.r_squared > 0.7
-        {
-            strategy_scores.insert(
-                "strong_trend",
-                characteristics.trend.r_squared * 1.5,
-            );
+        if characteristics.trend.strength == "strong" && characteristics.trend.r_squared > 0.7 {
+            strategy_scores.insert("strong_trend", characteristics.trend.r_squared * 1.5);
             debug!("Strong trend detected");
         }
 
@@ -142,7 +132,10 @@ impl AdaptiveModelSelector {
             debug!(scores = ?strategy_scores, best = name, "Strategy scores");
             name
         } else {
-            debug!(base = base_strategy, "No characteristic-based strategy, using base");
+            debug!(
+                base = base_strategy,
+                "No characteristic-based strategy, using base"
+            );
             base_strategy
         };
 
@@ -273,11 +266,7 @@ fn initialize_strategies() -> HashMap<String, ModelSelectionStrategy> {
                 "NPTS".into(),
                 "AutoETS".into(),
             ],
-            excluded_models: vec![
-                "Naive".into(),
-                "SeasonalNaive".into(),
-                "Chronos".into(),
-            ],
+            excluded_models: vec!["Naive".into(), "SeasonalNaive".into(), "Chronos".into()],
             time_allocation: TimeAllocation {
                 fast: 0.1,
                 medium: 0.5,
@@ -297,11 +286,7 @@ fn initialize_strategies() -> HashMap<String, ModelSelectionStrategy> {
                 "DirectTabular".into(),
                 "DeepAR".into(),
             ],
-            excluded_models: vec![
-                "Naive".into(),
-                "SeasonalNaive".into(),
-                "Chronos".into(),
-            ],
+            excluded_models: vec!["Naive".into(), "SeasonalNaive".into(), "Chronos".into()],
             time_allocation: TimeAllocation {
                 fast: 0.1,
                 medium: 0.4,
@@ -368,11 +353,7 @@ fn initialize_strategies() -> HashMap<String, ModelSelectionStrategy> {
                 "AutoETS".into(),
                 "DirectTabular".into(),
             ],
-            excluded_models: vec![
-                "Naive".into(),
-                "SeasonalNaive".into(),
-                "Chronos".into(),
-            ],
+            excluded_models: vec!["Naive".into(), "SeasonalNaive".into(), "Chronos".into()],
             time_allocation: TimeAllocation {
                 fast: 0.2,
                 medium: 0.5,
@@ -453,12 +434,7 @@ fn adjust_for_long_time(strategy: &ModelSelectionStrategy) -> ModelSelectionStra
     debug!("Adjusting strategy for long time budget");
 
     let mut extended = strategy.priority_models.clone();
-    let candidates = [
-        "DeepAR",
-        "TemporalFusionTransformer",
-        "PatchTST",
-        "TiDE",
-    ];
+    let candidates = ["DeepAR", "TemporalFusionTransformer", "PatchTST", "TiDE"];
 
     for model in &candidates {
         let s = model.to_string();

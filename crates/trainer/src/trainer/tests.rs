@@ -15,11 +15,7 @@ fn make_timestamps(n: usize) -> Vec<NaiveDateTime> {
 fn make_strategy() -> ModelSelectionStrategy {
     ModelSelectionStrategy {
         strategy_name: "balanced".into(),
-        priority_models: vec![
-            "SeasonalNaive".into(),
-            "AutoETS".into(),
-            "NPTS".into(),
-        ],
+        priority_models: vec!["SeasonalNaive".into(), "AutoETS".into(), "NPTS".into()],
         excluded_models: vec!["Naive".into()],
         time_allocation: TimeAllocation {
             fast: 0.2,
@@ -60,11 +56,7 @@ fn test_hierarchical_constant_data() {
     assert_eq!(forecast.mean.len(), 3);
     // Constant data → predictions should be near 42
     for v in &forecast.mean {
-        assert!(
-            (*v - 42.0).abs() < 20.0,
-            "Expected ~42, got {}",
-            v
-        );
+        assert!((*v - 42.0).abs() < 20.0, "Expected ~42, got {}", v);
     }
 }
 
@@ -109,7 +101,11 @@ fn test_inverse_mae_ensemble_weighted() {
     // f1 has much better score (0.01) vs f2 (1.0) → f1 dominates
     let ensemble = inverse_mae_ensemble(&[(f1, 0.01), (f2, 1.0)], 1);
     // f1 weight: 1/0.01 = 100, f2 weight: 1/1.0 = 1 → f1 dominates
-    assert!(ensemble.mean[0] < 110.0, "Expected ~100, got {}", ensemble.mean[0]);
+    assert!(
+        ensemble.mean[0] < 110.0,
+        "Expected ~100, got {}",
+        ensemble.mean[0]
+    );
 }
 
 #[test]
@@ -145,10 +141,7 @@ fn make_forecast(name: &str) -> ForecastOutput {
 #[test]
 fn test_filter_by_score_removes_outliers() {
     // best=0.5, threshold=max(0.5*3, 2.0)=2.0 → score=8.0 excluded
-    let forecasts = vec![
-        (make_forecast("Good"), 0.5),
-        (make_forecast("Bad"), 8.0),
-    ];
+    let forecasts = vec![(make_forecast("Good"), 0.5), (make_forecast("Bad"), 8.0)];
     let filtered = filter_by_score(&forecasts);
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].0.model_name, "Good");
@@ -218,7 +211,7 @@ fn test_ensemble_with_filtering_seasonal() {
 
     let period = 12;
     let n = 200; // More data for better ETS fit
-    // Generate seasonal data with trend (ETS excels at this)
+                 // Generate seasonal data with trend (ETS excels at this)
     let values: Vec<f64> = (0..n)
         .map(|i| {
             100.0

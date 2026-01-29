@@ -12,9 +12,7 @@ pub struct NptsModel {
 
 impl NptsModel {
     pub fn new(k: Option<usize>) -> Self {
-        Self {
-            k: k.unwrap_or(5),
-        }
+        Self { k: k.unwrap_or(5) }
     }
 }
 
@@ -86,10 +84,7 @@ impl ForecastModel for NptsModel {
         let top_k = &candidates[..k];
 
         // Inverse-distance weighting
-        let weights: Vec<f64> = top_k
-            .iter()
-            .map(|(_, d)| 1.0 / (d + 1e-10))
-            .collect();
+        let weights: Vec<f64> = top_k.iter().map(|(_, d)| 1.0 / (d + 1e-10)).collect();
         let total_weight: f64 = weights.iter().sum();
 
         // Weighted average of the subsequent values
@@ -97,7 +92,7 @@ impl ForecastModel for NptsModel {
         for (idx, &(start, _)) in top_k.iter().enumerate() {
             let forecast_start = start + context_len;
             let w = weights[idx] / total_weight;
-            for h in 0..horizon {
+            for (h, mean_val) in mean.iter_mut().enumerate() {
                 let source_idx = forecast_start + h;
                 let val = if source_idx < n {
                     values[source_idx]
@@ -105,7 +100,7 @@ impl ForecastModel for NptsModel {
                     // If we run out of future values, use the last available
                     values[n - 1]
                 };
-                mean[h] += w * val;
+                *mean_val += w * val;
             }
         }
 
@@ -145,9 +140,7 @@ mod tests {
     fn test_npts_repeating_pattern() {
         let mut model = NptsModel::new(Some(3));
         // Repeating pattern: should find similar subsequences
-        let values: Vec<f64> = (0..60)
-            .map(|i| (i % 10) as f64 * 5.0 + 100.0)
-            .collect();
+        let values: Vec<f64> = (0..60).map(|i| (i % 10) as f64 * 5.0 + 100.0).collect();
         let ts = make_timestamps(60);
         let output = model.fit_predict(&values, &ts, 5).unwrap();
         assert_eq!(output.mean.len(), 5);

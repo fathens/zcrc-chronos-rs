@@ -131,9 +131,7 @@ mod tests {
         let n = 120;
         let values: Vec<f64> = (0..n)
             .map(|i| {
-                500.0
-                    + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin()
-                    + 1.0 * i as f64
+                500.0 + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin() + 1.0 * i as f64
             })
             .collect();
         let ts = make_timestamps(n);

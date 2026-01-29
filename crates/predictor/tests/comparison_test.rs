@@ -228,10 +228,7 @@ fn test_normalize_matches_python() {
 
         // Timestamps must match exactly
         for (i, (actual, expected)) in out_ts.iter().zip(expected_ts.iter()).enumerate() {
-            assert_eq!(
-                actual, expected,
-                "[{name}] timestamp mismatch at index {i}"
-            );
+            assert_eq!(actual, expected, "[{name}] timestamp mismatch at index {i}");
         }
 
         // Values must match within floating-point tolerance
@@ -240,9 +237,7 @@ fn test_normalize_matches_python() {
             case.output.values.len(),
             "[{name}] value count mismatch"
         );
-        for (i, (actual, expected)) in
-            out_vals.iter().zip(case.output.values.iter()).enumerate()
-        {
+        for (i, (actual, expected)) in out_vals.iter().zip(case.output.values.iter()).enumerate() {
             assert_close(
                 *actual,
                 *expected,
@@ -295,8 +290,7 @@ fn test_analyzer_trend_matches_python() {
 
         // Mann-Kendall S statistic must match exactly
         assert_eq!(
-            result.trend.mann_kendall.s_statistic,
-            expected.mann_kendall.s_statistic,
+            result.trend.mann_kendall.s_statistic, expected.mann_kendall.s_statistic,
             "[{name}] Mann-Kendall S mismatch"
         );
     }
@@ -531,9 +525,6 @@ fn test_selector_strategy_matches_python() {
             1e-10,
             &format!("[{name}] time_allocation.advanced"),
         );
-        assert_eq!(
-            result.preset, expected.preset,
-            "[{name}] preset mismatch"
-        );
+        assert_eq!(result.preset, expected.preset, "[{name}] preset mismatch");
     }
 }
