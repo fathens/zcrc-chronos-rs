@@ -117,12 +117,37 @@ impl TimeSeriesAnalyzer {
         }
 
         let n = values.len();
-        let m = mean(values);
 
-        // Prepare FFT input: values - mean
-        let mut buffer: Vec<Complex<f64>> = values
+        // Detrend the data to prevent linear trend from dominating the spectrum.
+        // This is important for trend+seasonal data where the trend creates a
+        // strong low-frequency component that can mask the seasonal peak.
+        let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let (slope, intercept, _, _, _) = linregress(&x, values);
+        let detrended: Vec<f64> = values
             .iter()
-            .map(|&v| Complex::new(v - m, 0.0))
+            .enumerate()
+            .map(|(i, &v)| v - (slope * i as f64 + intercept))
+            .collect();
+
+        // Check if detrended data has significant variance.
+        // If the residuals are nearly constant, there's no seasonality to detect.
+        let detrended_var = variance(&detrended);
+        let data_range = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+            - values.iter().cloned().fold(f64::INFINITY, f64::min);
+        if detrended_var < (data_range * 0.01).powi(2) {
+            // Detrended variance is less than 1% of data range squared
+            return SeasonalityInfo {
+                strength: "weak".into(),
+                period: None,
+                score: 0.0,
+                dominant_frequency: None,
+            };
+        }
+
+        // Prepare FFT input: detrended values (already zero-mean after detrending)
+        let mut buffer: Vec<Complex<f64>> = detrended
+            .iter()
+            .map(|&v| Complex::new(v, 0.0))
             .collect();
 
         let mut planner = FftPlanner::new();
@@ -1044,8 +1069,9 @@ mod tests {
         let analyzer = TimeSeriesAnalyzer::new();
         let period = 12;
 
-        // Use shorter lengths where trend doesn't dominate as much
-        for n in [90, 100] {
+        // Test various lengths including those used in benchmarks
+        // (100-10=90, 200-20=180, 500-50=450 training points)
+        for n in [90, 100, 180, 450] {
             let vals: Vec<f64> = (0..n)
                 .map(|i| {
                     // Trend + seasonal (like trend_plus_seasonal benchmark)
