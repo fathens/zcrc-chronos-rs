@@ -174,21 +174,42 @@ impl TimeSeriesAnalyzer {
             })
             .unwrap();
 
-        let main_freq_idx = best_peak_local + 1; // actual FFT bin index
+        // Apply parabolic interpolation to refine peak position.
+        // This improves period accuracy when the true frequency falls between FFT bins.
+        // Formula: delta = 0.5 * (y[i-1] - y[i+1]) / (y[i-1] - 2*y[i] + y[i+1])
+        let refined_peak = if best_peak_local > 0 && best_peak_local < positive_power.len() - 1 {
+            let y_prev = positive_power[best_peak_local - 1];
+            let y_curr = positive_power[best_peak_local];
+            let y_next = positive_power[best_peak_local + 1];
+            let denom = y_prev - 2.0 * y_curr + y_next;
+            if denom.abs() > 1e-10 {
+                let delta = 0.5 * (y_prev - y_next) / denom;
+                // Clamp delta to [-0.5, 0.5] to stay within neighboring bins
+                best_peak_local as f64 + delta.clamp(-0.5, 0.5)
+            } else {
+                best_peak_local as f64
+            }
+        } else {
+            best_peak_local as f64
+        };
+
+        // actual FFT bin index (refined)
+        let main_freq_idx = refined_peak + 1.0;
 
         // Frequency = index / n
-        let freq = main_freq_idx as f64 / n as f64;
-        // Use rounding for better period estimation (FFT bins are discrete)
-        let period = if freq != 0.0 {
+        let freq = main_freq_idx / n as f64;
+        let period = if freq > 1e-10 {
             Some((1.0 / freq).round() as usize)
         } else {
             None
         };
 
         // Strength score = power at peak / total power
+        // Use the discrete bin index for power lookup
+        let peak_bin_idx = best_peak_local + 1;
         let total_power: f64 = power.iter().sum();
         let strength_score = if total_power > 0.0 {
-            power[main_freq_idx] / total_power
+            power[peak_bin_idx] / total_power
         } else {
             0.0
         };
@@ -979,5 +1000,71 @@ mod tests {
         ];
         let density = analyzer.analyze_time_intervals(&ts);
         assert!(!density.regular);
+    }
+
+    /// Test period detection accuracy for various data lengths (pure seasonal).
+    ///
+    /// This is a regression test for FFT bin discretization issues.
+    /// For n=90 and period=12, the true frequency 1/12=0.0833 falls between
+    /// FFT bins 7 (freq=0.0778) and 8 (freq=0.0889). Without interpolation,
+    /// the wrong period (11 or 13) may be detected.
+    #[test]
+    fn test_seasonality_period_accuracy_pure() {
+        let analyzer = TimeSeriesAnalyzer::new();
+        let period = 12;
+
+        // Test multiple data lengths that previously caused issues
+        for n in [90, 100, 150, 200] {
+            let vals: Vec<f64> = (0..n)
+                .map(|i| {
+                    // Pure seasonal (no trend)
+                    30.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
+                })
+                .collect();
+            let ts = uniform_timestamps(n, 3600);
+            let chars = analyzer.analyze(&vals, &ts);
+
+            assert_eq!(
+                chars.seasonality.period,
+                Some(period),
+                "pure seasonal n={}: expected period {}, got {:?}",
+                n,
+                period,
+                chars.seasonality.period
+            );
+        }
+    }
+
+    /// Test period detection for trend + seasonal data.
+    ///
+    /// The trend component creates a large low-frequency peak in FFT.
+    /// This test verifies that we can still detect the seasonal period.
+    #[test]
+    fn test_seasonality_period_accuracy_with_trend() {
+        let analyzer = TimeSeriesAnalyzer::new();
+        let period = 12;
+
+        // Use shorter lengths where trend doesn't dominate as much
+        for n in [90, 100] {
+            let vals: Vec<f64> = (0..n)
+                .map(|i| {
+                    // Trend + seasonal (like trend_plus_seasonal benchmark)
+                    100.0
+                        + 1.5 * i as f64
+                        + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
+                })
+                .collect();
+            let ts = uniform_timestamps(n, 3600);
+            let chars = analyzer.analyze(&vals, &ts);
+
+            assert_eq!(
+                chars.seasonality.period,
+                Some(period),
+                "trend+seasonal n={}: expected period {}, got {:?}",
+                n,
+                period,
+                chars.seasonality.period
+            );
+        }
     }
 }
