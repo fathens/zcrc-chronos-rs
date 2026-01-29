@@ -117,12 +117,37 @@ impl TimeSeriesAnalyzer {
         }
 
         let n = values.len();
-        let m = mean(values);
 
-        // Prepare FFT input: values - mean
-        let mut buffer: Vec<Complex<f64>> = values
+        // Detrend the data to prevent linear trend from dominating the spectrum.
+        // This is important for trend+seasonal data where the trend creates a
+        // strong low-frequency component that can mask the seasonal peak.
+        let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let (slope, intercept, _, _, _) = linregress(&x, values);
+        let detrended: Vec<f64> = values
             .iter()
-            .map(|&v| Complex::new(v - m, 0.0))
+            .enumerate()
+            .map(|(i, &v)| v - (slope * i as f64 + intercept))
+            .collect();
+
+        // Check if detrended data has significant variance.
+        // If the residuals are nearly constant, there's no seasonality to detect.
+        let detrended_var = variance(&detrended);
+        let data_range = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+            - values.iter().cloned().fold(f64::INFINITY, f64::min);
+        if detrended_var < (data_range * 0.01).powi(2) {
+            // Detrended variance is less than 1% of data range squared
+            return SeasonalityInfo {
+                strength: "weak".into(),
+                period: None,
+                score: 0.0,
+                dominant_frequency: None,
+            };
+        }
+
+        // Prepare FFT input: detrended values (already zero-mean after detrending)
+        let mut buffer: Vec<Complex<f64>> = detrended
+            .iter()
+            .map(|&v| Complex::new(v, 0.0))
             .collect();
 
         let mut planner = FftPlanner::new();
@@ -174,21 +199,42 @@ impl TimeSeriesAnalyzer {
             })
             .unwrap();
 
-        let main_freq_idx = best_peak_local + 1; // actual FFT bin index
+        // Apply parabolic interpolation to refine peak position.
+        // This improves period accuracy when the true frequency falls between FFT bins.
+        // Formula: delta = 0.5 * (y[i-1] - y[i+1]) / (y[i-1] - 2*y[i] + y[i+1])
+        let refined_peak = if best_peak_local > 0 && best_peak_local < positive_power.len() - 1 {
+            let y_prev = positive_power[best_peak_local - 1];
+            let y_curr = positive_power[best_peak_local];
+            let y_next = positive_power[best_peak_local + 1];
+            let denom = y_prev - 2.0 * y_curr + y_next;
+            if denom.abs() > 1e-10 {
+                let delta = 0.5 * (y_prev - y_next) / denom;
+                // Clamp delta to [-0.5, 0.5] to stay within neighboring bins
+                best_peak_local as f64 + delta.clamp(-0.5, 0.5)
+            } else {
+                best_peak_local as f64
+            }
+        } else {
+            best_peak_local as f64
+        };
+
+        // actual FFT bin index (refined)
+        let main_freq_idx = refined_peak + 1.0;
 
         // Frequency = index / n
-        let freq = main_freq_idx as f64 / n as f64;
-        // Python uses int() which truncates toward zero, matching floor for positive values
-        let period = if freq != 0.0 {
-            Some((1.0 / freq) as usize)
+        let freq = main_freq_idx / n as f64;
+        let period = if freq > 1e-10 {
+            Some((1.0 / freq).round() as usize)
         } else {
             None
         };
 
         // Strength score = power at peak / total power
+        // Use the discrete bin index for power lookup
+        let peak_bin_idx = best_peak_local + 1;
         let total_power: f64 = power.iter().sum();
         let strength_score = if total_power > 0.0 {
-            power[main_freq_idx] / total_power
+            power[peak_bin_idx] / total_power
         } else {
             0.0
         };
@@ -253,10 +299,14 @@ impl TimeSeriesAnalyzer {
 
         let mann_kendall = self.mann_kendall_test(values);
 
+        // Detect exponential growth: compare linear R² vs log-linear R²
+        let is_exponential = self.detect_exponential_trend(values, r_squared);
+
         debug!(
             strength = strength,
             direction = direction,
             r_squared = format!("{:.3}", r_squared),
+            is_exponential = is_exponential,
             "Trend analysis complete"
         );
 
@@ -267,7 +317,75 @@ impl TimeSeriesAnalyzer {
             r_squared,
             p_value,
             mann_kendall,
+            is_exponential,
         }
+    }
+
+    /// Detect if the trend is exponential by comparing linear vs log-linear fit.
+    ///
+    /// Returns true if:
+    /// 1. All values are positive (required for log transform)
+    /// 2. Log-linear R² is significantly better than linear R² (by at least 0.1)
+    /// 3. Log-linear R² is strong (> 0.8)
+    /// 4. There's a clear increasing trend
+    fn detect_exponential_trend(&self, values: &[f64], linear_r_squared: f64) -> bool {
+        let n = values.len();
+        if n < 10 {
+            return false;
+        }
+
+        // Check all values are positive (required for log)
+        let min_val = values.iter().cloned().fold(f64::INFINITY, f64::min);
+        if min_val <= 0.0 {
+            return false;
+        }
+
+        // Check for increasing trend (exponential decay is rare in forecasting context)
+        let first_quarter_mean = mean(&values[..n / 4]);
+        let last_quarter_mean = mean(&values[3 * n / 4..]);
+        if last_quarter_mean <= first_quarter_mean * 1.5 {
+            // Not enough growth to be exponential
+            return false;
+        }
+
+        // Compute log-linear fit: regress x against log(y)
+        let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let log_values: Vec<f64> = values.iter().map(|v| v.ln()).collect();
+
+        let (_, _, r_log, _, _) = linregress(&x, &log_values);
+        let log_r_squared = r_log * r_log;
+
+        // Exponential if log-linear fit is nearly perfect and significantly better than linear.
+        // Additional check: exponential data has consistent positive curvature (second derivative > 0).
+        // Piecewise linear (changepoint) has zero curvature except at the kink point.
+
+        // Check for consistent positive curvature (characteristic of exponential growth)
+        let second_diffs: Vec<f64> = values
+            .windows(3)
+            .map(|w| (w[2] - w[1]) - (w[1] - w[0]))
+            .collect();
+        let mean_curvature = second_diffs.iter().sum::<f64>() / second_diffs.len() as f64;
+        let positive_curvatures = second_diffs.iter().filter(|&&d| d > 0.0).count();
+        let curvature_ratio = positive_curvatures as f64 / second_diffs.len() as f64;
+
+        // Exponential has consistent positive curvature (most second diffs > 0)
+        // Piecewise linear has mostly zero curvature with a spike at the changepoint
+        if curvature_ratio < 0.7 || mean_curvature < 0.0 {
+            return false;
+        }
+
+        let is_exp = log_r_squared > 0.99
+            && log_r_squared > linear_r_squared + 0.01;
+
+        if is_exp {
+            debug!(
+                linear_r2 = format!("{:.3}", linear_r_squared),
+                log_r2 = format!("{:.3}", log_r_squared),
+                "Exponential trend detected"
+            );
+        }
+
+        is_exp
     }
 
     // ---- Mann-Kendall Test ----
@@ -925,5 +1043,127 @@ mod tests {
         ];
         let density = analyzer.analyze_time_intervals(&ts);
         assert!(!density.regular);
+    }
+
+    /// Test period detection accuracy for various data lengths (pure seasonal).
+    ///
+    /// This is a regression test for FFT bin discretization issues.
+    /// For n=90 and period=12, the true frequency 1/12=0.0833 falls between
+    /// FFT bins 7 (freq=0.0778) and 8 (freq=0.0889). Without interpolation,
+    /// the wrong period (11 or 13) may be detected.
+    #[test]
+    fn test_seasonality_period_accuracy_pure() {
+        let analyzer = TimeSeriesAnalyzer::new();
+        let period = 12;
+
+        // Test multiple data lengths that previously caused issues
+        for n in [90, 100, 150, 200] {
+            let vals: Vec<f64> = (0..n)
+                .map(|i| {
+                    // Pure seasonal (no trend)
+                    30.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
+                })
+                .collect();
+            let ts = uniform_timestamps(n, 3600);
+            let chars = analyzer.analyze(&vals, &ts);
+
+            assert_eq!(
+                chars.seasonality.period,
+                Some(period),
+                "pure seasonal n={}: expected period {}, got {:?}",
+                n,
+                period,
+                chars.seasonality.period
+            );
+        }
+    }
+
+    /// Test period detection for trend + seasonal data.
+    ///
+    /// The trend component creates a large low-frequency peak in FFT.
+    /// This test verifies that we can still detect the seasonal period.
+    #[test]
+    fn test_seasonality_period_accuracy_with_trend() {
+        let analyzer = TimeSeriesAnalyzer::new();
+        let period = 12;
+
+        // Test various lengths including those used in benchmarks
+        // (100-10=90, 200-20=180, 500-50=450 training points)
+        for n in [90, 100, 180, 450] {
+            let vals: Vec<f64> = (0..n)
+                .map(|i| {
+                    // Trend + seasonal (like trend_plus_seasonal benchmark)
+                    100.0
+                        + 1.5 * i as f64
+                        + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
+                })
+                .collect();
+            let ts = uniform_timestamps(n, 3600);
+            let chars = analyzer.analyze(&vals, &ts);
+
+            assert_eq!(
+                chars.seasonality.period,
+                Some(period),
+                "trend+seasonal n={}: expected period {}, got {:?}",
+                n,
+                period,
+                chars.seasonality.period
+            );
+        }
+    }
+
+    /// Test exponential trend detection for various data lengths.
+    ///
+    /// This is a regression test: exponential_growth_100 was not detected as
+    /// exponential, causing the log transform to be skipped and MASE to be 1.84.
+    #[test]
+    fn test_exponential_trend_detection() {
+        let analyzer = TimeSeriesAnalyzer::new();
+
+        // Test data matching benchmark: 100 * exp(0.02 * i)
+        // Training lengths: 90 (100-10), 180 (200-20), 450 (500-50)
+        for n in [90, 180, 450] {
+            let vals: Vec<f64> = (0..n).map(|i| 100.0 * (0.02 * i as f64).exp()).collect();
+            let ts = uniform_timestamps(n, 3600);
+            let chars = analyzer.analyze(&vals, &ts);
+
+            assert!(
+                chars.trend.is_exponential,
+                "exponential n={}: expected is_exponential=true, linear_r²={:.3}",
+                n,
+                chars.trend.r_squared
+            );
+        }
+    }
+
+    /// Test that changepoint data is NOT detected as exponential.
+    ///
+    /// Changepoint has piecewise linear pattern with slope change in the middle.
+    /// This should NOT trigger exponential detection.
+    #[test]
+    fn test_changepoint_not_exponential() {
+        let analyzer = TimeSeriesAnalyzer::new();
+
+        // Test data matching benchmark: piecewise linear
+        for n in [90, 180, 450] {
+            let mid = n / 2;
+            let vals: Vec<f64> = (0..n)
+                .map(|i| {
+                    if i < mid {
+                        100.0 + 1.0 * i as f64
+                    } else {
+                        100.0 + 1.0 * mid as f64 + 3.0 * (i - mid) as f64
+                    }
+                })
+                .collect();
+            let ts = uniform_timestamps(n, 3600);
+            let chars = analyzer.analyze(&vals, &ts);
+
+            assert!(
+                !chars.trend.is_exponential,
+                "changepoint n={}: expected is_exponential=false",
+                n
+            );
+        }
     }
 }

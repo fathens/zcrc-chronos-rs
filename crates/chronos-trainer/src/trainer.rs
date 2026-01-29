@@ -6,7 +6,7 @@ use chronos_core::{
     ChronosError, ForecastModel, ForecastOutput, ModelSelectionStrategy,
     ModelTrainingResult, Result, TimeAllocation,
 };
-use chronos_models::{EtsModel, NptsModel, SeasonalNaiveModel, ThetaModel};
+use chronos_models::{EtsModel, MstlEtsModel, NptsModel, SeasonalNaiveModel, ThetaModel};
 use chronos_selector::AdaptiveModelSelector;
 use tracing::{debug, info, warn};
 
@@ -32,6 +32,10 @@ impl HierarchicalTrainer {
     }
 
     /// Run hierarchical training and return the best ensemble forecast.
+    ///
+    /// `season_period` is the detected seasonal period (from the analyzer).
+    /// When provided, it is forwarded to models that support seasonality
+    /// (SeasonalNaive, ETS).
     pub fn train_hierarchically(
         &mut self,
         values: &[f64],
@@ -39,6 +43,7 @@ impl HierarchicalTrainer {
         strategy: &ModelSelectionStrategy,
         time_budget_secs: f64,
         horizon: usize,
+        season_period: Option<usize>,
     ) -> Result<(ForecastOutput, TrainingMetadata)> {
         info!("Starting hierarchical training");
 
@@ -80,7 +85,7 @@ impl HierarchicalTrainer {
 
             let stage_start = Instant::now();
             let stage_forecasts =
-                self.train_stage(values, timestamps, models, horizon, &strategy.excluded_models);
+                self.train_stage(values, timestamps, models, horizon, &strategy.excluded_models, season_period);
             let stage_time = stage_start.elapsed().as_secs_f64();
 
             for (forecast, score) in &stage_forecasts {
@@ -126,8 +131,16 @@ impl HierarchicalTrainer {
             ));
         }
 
+        // Filter out poor-performing models before ensembling
+        let filtered = filter_by_score(&all_forecasts);
+        info!(
+            before = all_forecasts.len(),
+            after = filtered.len(),
+            "Filtered models for ensemble"
+        );
+
         // Ensemble: inverse-MAE weighted average
-        let ensemble = inverse_mae_ensemble(&all_forecasts, horizon);
+        let ensemble = inverse_mae_ensemble(&filtered, horizon);
 
         let total_time = start.elapsed().as_secs_f64();
         let metadata = TrainingMetadata {
@@ -140,13 +153,13 @@ impl HierarchicalTrainer {
                 .collect(),
             best_overall_score: self.best_score,
             results_summary: self.summarize_results(),
-            model_count: all_forecasts.len(),
+            model_count: filtered.len(),
         };
 
         info!(
             total_time = format!("{:.1}s", total_time),
             best_score = format!("{:.4}", self.best_score),
-            models = all_forecasts.len(),
+            models = filtered.len(),
             "Hierarchical training complete"
         );
 
@@ -154,6 +167,11 @@ impl HierarchicalTrainer {
     }
 
     /// Train all models in a stage, returning forecasts with scores.
+    ///
+    /// For each model, scoring uses holdout cross-validation: the last
+    /// `holdout_len` points are withheld, the model is trained on the
+    /// remainder, and its forecast is compared to the held-out values.
+    /// The final forecast is then produced from the full data.
     fn train_stage(
         &self,
         values: &[f64],
@@ -161,15 +179,36 @@ impl HierarchicalTrainer {
         model_names: &[String],
         horizon: usize,
         excluded_models: &[String],
+        season_period: Option<usize>,
     ) -> Vec<(ForecastOutput, f64)> {
         let mut results = Vec::new();
+
+        let n = values.len();
+        // Holdout size: same as forecast horizon, but capped to leave enough training data
+        let min_train = 10;
+        let holdout_len = horizon.min(n.saturating_sub(min_train)).max(1);
+        let can_holdout = n > min_train + holdout_len;
 
         for model_name in model_names {
             if excluded_models.contains(model_name) {
                 continue;
             }
 
-            let mut model: Box<dyn ForecastModel> = match create_model(model_name, values) {
+            // Score via holdout CV
+            let score = if can_holdout {
+                evaluate_holdout(
+                    values,
+                    timestamps,
+                    model_name,
+                    holdout_len,
+                    season_period,
+                )
+            } else {
+                1.0 // insufficient data for holdout; neutral score
+            };
+
+            // Full-data forecast
+            let mut model: Box<dyn ForecastModel> = match create_model(model_name, values, season_period) {
                 Some(m) => m,
                 None => {
                     debug!(model = %model_name, "Unknown model, skipping");
@@ -179,7 +218,6 @@ impl HierarchicalTrainer {
 
             match model.fit_predict(values, timestamps, horizon) {
                 Ok(forecast) => {
-                    let score = evaluate_forecast(values, &forecast);
                     debug!(
                         model = %model_name,
                         score = format!("{:.4}", score),
@@ -291,11 +329,17 @@ fn calculate_time_allocation(
 }
 
 /// Create a model instance by name.
-fn create_model(name: &str, _values: &[f64]) -> Option<Box<dyn ForecastModel>> {
+///
+/// `season_period` is forwarded to models that support seasonality.
+fn create_model(name: &str, _values: &[f64], season_period: Option<usize>) -> Option<Box<dyn ForecastModel>> {
     match name {
-        "SeasonalNaive" => Some(Box::new(SeasonalNaiveModel::new(None))),
-        "AutoETS" | "ETS" => Some(Box::new(EtsModel::new(None))),
+        "SeasonalNaive" => Some(Box::new(SeasonalNaiveModel::new(season_period))),
+        "AutoETS" | "ETS" => Some(Box::new(EtsModel::new(season_period))),
         "Theta" | "DynamicOptimizedTheta" => Some(Box::new(ThetaModel::new())),
+        "MSTL" => {
+            let periods = season_period.map(|p| vec![p]);
+            Some(Box::new(MstlEtsModel::new(periods)))
+        }
         "NPTS" => Some(Box::new(NptsModel::default())),
         // Models not yet implemented return None
         _ => {
@@ -305,34 +349,96 @@ fn create_model(name: &str, _values: &[f64]) -> Option<Box<dyn ForecastModel>> {
     }
 }
 
-/// Evaluate forecast quality using a simple metric.
-/// Uses coefficient of variation of the predictions relative to the input data.
-fn evaluate_forecast(values: &[f64], forecast: &ForecastOutput) -> f64 {
-    if forecast.mean.is_empty() || values.is_empty() {
-        return 1.0;
-    }
-
-    // Use the last N values as a rough "expected" range
+/// Evaluate a model via holdout cross-validation.
+///
+/// Withholds the last `holdout_len` values, trains the model on the
+/// remainder, predicts `holdout_len` steps, and returns the MASE score
+/// against the held-out values. Lower is better; < 1.0 beats seasonal naive.
+fn evaluate_holdout(
+    values: &[f64],
+    timestamps: &[NaiveDateTime],
+    model_name: &str,
+    holdout_len: usize,
+    season_period: Option<usize>,
+) -> f64 {
     let n = values.len();
-    let recent = &values[n.saturating_sub(forecast.mean.len())..];
-    if recent.is_empty() {
-        return 1.0;
+    let split = n - holdout_len;
+    let train_values = &values[..split];
+    let train_timestamps = &timestamps[..split];
+    let actual = &values[split..];
+
+    let mut model: Box<dyn ForecastModel> = match create_model(model_name, train_values, season_period) {
+        Some(m) => m,
+        None => return 1.0,
+    };
+
+    match model.fit_predict(train_values, train_timestamps, holdout_len) {
+        Ok(forecast) => {
+            let season = season_period.unwrap_or(1);
+            let score = chronos_core::metrics::mase(&forecast.mean, actual, train_values, season);
+            // Cap Inf (e.g. constant series where naive denominator is zero)
+            // to a large finite value so ensemble weighting still works.
+            if score.is_infinite() || score.is_nan() {
+                let mae = chronos_core::metrics::mae(&forecast.mean, actual);
+                if mae < 1e-10 {
+                    // Perfect fit on holdout: score = 0 (best possible)
+                    0.0
+                } else {
+                    // Fall back to normalized MAE
+                    let mean_abs = actual.iter().map(|v| v.abs()).sum::<f64>()
+                        / actual.len().max(1) as f64;
+                    if mean_abs > 1e-10 { mae / mean_abs } else { 1.0 }
+                }
+            } else {
+                score
+            }
+        }
+        Err(e) => {
+            debug!(model = model_name, error = %e, "Holdout evaluation failed");
+            // Large finite fallback so the model is down-weighted but doesn't break ensemble
+            100.0
+        }
+    }
+}
+
+/// Filter forecasts by score quality.
+///
+/// Removes models whose score is significantly worse than the best model.
+/// This prevents poor-performing models (e.g., non-seasonal models on seasonal data)
+/// from diluting ensemble accuracy.
+///
+/// Threshold: max(best_score * 3.0, 2.0)
+/// - best=0.5 → threshold=2.0 → Theta(MASE~8) excluded
+/// - best=0.01 → threshold=2.0 → nearly all models pass
+/// - best=5.0 → threshold=15.0 → all models pass (data is hard for everyone)
+fn filter_by_score(forecasts: &[(ForecastOutput, f64)]) -> Vec<(ForecastOutput, f64)> {
+    if forecasts.len() <= 1 {
+        return forecasts.to_vec();
     }
 
-    // MAE between forecast and last-known values (naive benchmark)
-    let mae: f64 = forecast
-        .mean
+    let best_score = forecasts
         .iter()
-        .zip(recent.iter().cycle())
-        .map(|(pred, actual)| (pred - actual).abs())
-        .sum::<f64>()
-        / forecast.mean.len() as f64;
+        .map(|(_, s)| *s)
+        .fold(f64::INFINITY, f64::min);
 
-    let mean_abs = recent.iter().map(|v| v.abs()).sum::<f64>() / recent.len() as f64;
-    if mean_abs > 1e-8 {
-        mae / mean_abs
+    let threshold = (best_score * 3.0).max(2.0);
+
+    let filtered: Vec<_> = forecasts
+        .iter()
+        .filter(|(_, s)| *s <= threshold)
+        .cloned()
+        .collect();
+
+    if filtered.is_empty() {
+        // Fallback: keep only the best model
+        forecasts
+            .iter()
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .into_iter()
+            .cloned()
+            .collect()
     } else {
-        1.0
+        filtered
     }
 }
 

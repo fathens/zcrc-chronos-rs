@@ -40,12 +40,23 @@ impl AdaptiveModelSelector {
         _horizon: usize,
         time_budget: u64,
     ) -> ModelSelectionStrategy {
+        let characteristics = self.analyzer.analyze(values, timestamps);
+        self.select_strategy_from_characteristics(&characteristics, values.len(), time_budget)
+    }
+
+    /// Select optimal strategy from pre-computed characteristics.
+    ///
+    /// Use this when the caller already has `TimeSeriesCharacteristics`
+    /// (e.g. to avoid running the analyzer twice).
+    pub fn select_strategy_from_characteristics(
+        &self,
+        characteristics: &TimeSeriesCharacteristics,
+        data_size: usize,
+        time_budget: u64,
+    ) -> ModelSelectionStrategy {
         info!("Selecting optimal strategy based on data characteristics");
 
-        let characteristics = self.analyzer.analyze(values, timestamps);
-        let data_size = values.len();
-
-        let strategy = self.determine_strategy(&characteristics, data_size, time_budget);
+        let strategy = self.determine_strategy(characteristics, data_size, time_budget);
 
         info!(
             strategy = %strategy.strategy_name,
@@ -162,7 +173,7 @@ impl AdaptiveModelSelector {
 
         for model in &strategy.priority_models {
             match model.as_str() {
-                "SeasonalNaive" | "AutoETS" | "ETS" | "Theta" => fast.push(model.clone()),
+                "SeasonalNaive" | "AutoETS" | "ETS" | "Theta" | "MSTL" => fast.push(model.clone()),
                 "RecursiveTabular" | "DirectTabular" | "NPTS" | "ARIMA" => {
                     medium.push(model.clone())
                 }
@@ -233,6 +244,7 @@ fn initialize_strategies() -> HashMap<String, ModelSelectionStrategy> {
             priority_models: vec![
                 "SeasonalNaive".into(),
                 "AutoETS".into(),
+                "MSTL".into(),
                 "Theta".into(),
                 "NPTS".into(),
             ],
@@ -306,6 +318,7 @@ fn initialize_strategies() -> HashMap<String, ModelSelectionStrategy> {
             priority_models: vec![
                 "AutoETS".into(),
                 "ETS".into(),
+                "MSTL".into(),
                 "Theta".into(),
                 "SeasonalNaive".into(),
             ],
@@ -375,6 +388,7 @@ fn initialize_strategies() -> HashMap<String, ModelSelectionStrategy> {
             strategy_name: "balanced".into(),
             priority_models: vec![
                 "AutoETS".into(),
+                "MSTL".into(),
                 "RecursiveTabular".into(),
                 "NPTS".into(),
                 "SeasonalNaive".into(),
@@ -400,7 +414,8 @@ fn initialize_strategies() -> HashMap<String, ModelSelectionStrategy> {
 fn adjust_for_short_time(strategy: &ModelSelectionStrategy) -> ModelSelectionStrategy {
     debug!("Adjusting strategy for short time budget");
 
-    let fast_models = ["SeasonalNaive", "AutoETS", "ETS"];
+    // Must match the "fast" category in get_hierarchical_model_groups
+    let fast_models = ["SeasonalNaive", "AutoETS", "ETS", "Theta", "MSTL"];
     let mut priority: Vec<String> = strategy
         .priority_models
         .iter()
@@ -409,7 +424,7 @@ fn adjust_for_short_time(strategy: &ModelSelectionStrategy) -> ModelSelectionStr
         .collect();
 
     if priority.is_empty() {
-        priority = vec!["SeasonalNaive".into(), "AutoETS".into()];
+        priority = vec!["SeasonalNaive".into(), "AutoETS".into(), "MSTL".into()];
     }
 
     let mut excluded = strategy.excluded_models.clone();

@@ -87,13 +87,41 @@ impl ForecastModel for ThetaModel {
             })
             .collect();
 
-        let lower: Option<Vec<f64>> = None;
-        let upper: Option<Vec<f64>> = None;
+        // Step 4: Residual-based prediction intervals (80% level)
+        // Compute in-sample fitted values and residuals
+        let in_sample_fitted: Vec<f64> = (0..n)
+            .map(|i| {
+                let linear = slope * i as f64 + intercept;
+                (linear + theta2_values[i]) / 2.0
+            })
+            .collect();
+
+        let residuals: Vec<f64> = values
+            .iter()
+            .zip(in_sample_fitted.iter())
+            .map(|(actual, fitted)| actual - fitted)
+            .collect();
+
+        let residual_std = {
+            let mean_r = residuals.iter().sum::<f64>() / n as f64;
+            let var = residuals.iter().map(|r| (r - mean_r).powi(2)).sum::<f64>()
+                / (n as f64 - 1.0).max(1.0);
+            var.sqrt()
+        };
+
+        // z_{0.90} = 1.2816 for 80% prediction interval (10th–90th percentile)
+        let z = 1.2816;
+        let lower: Vec<f64> = (0..horizon)
+            .map(|h| mean[h] - z * residual_std * ((h + 1) as f64).sqrt())
+            .collect();
+        let upper: Vec<f64> = (0..horizon)
+            .map(|h| mean[h] + z * residual_std * ((h + 1) as f64).sqrt())
+            .collect();
 
         Ok(ForecastOutput {
             mean,
-            lower_quantile: lower,
-            upper_quantile: upper,
+            lower_quantile: Some(lower),
+            upper_quantile: Some(upper),
             model_name: "Theta".into(),
         })
     }

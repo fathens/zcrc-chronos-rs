@@ -1,4 +1,5 @@
 use chrono::NaiveDateTime;
+use chronos_analyzer::TimeSeriesAnalyzer;
 use chronos_core::{decimals_to_f64s, f64s_to_decimals, BigDecimal, ChronosError, Result};
 use chronos_normalize::normalize_time_series_data;
 use chronos_selector::AdaptiveModelSelector;
@@ -36,7 +37,7 @@ pub struct ForecastResult {
 
 /// Main prediction entry point.
 ///
-/// Pipeline: normalize → analyze → select strategy → train models → ensemble.
+/// Pipeline: normalize → analyze → (log transform if exponential) → select strategy → train models → ensemble → (exp transform).
 pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
     let start = std::time::Instant::now();
 
@@ -73,39 +74,73 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
     let (norm_timestamps, norm_values) =
         normalize_time_series_data(&input.timestamps, &f64_values)?;
 
-    // Step 2: Select strategy
+    // Step 2: Analyze characteristics (run once, share with selector and trainer)
+    let analyzer = TimeSeriesAnalyzer::new();
+    let characteristics = analyzer.analyze(&norm_values, &norm_timestamps);
+    let season_period = characteristics.seasonality.period;
+    let is_exponential = characteristics.trend.is_exponential;
+
+    // Step 2.5: Apply log transform if exponential trend detected
+    let (train_values, log_transformed) = if is_exponential {
+        info!("Exponential trend detected, applying log transform");
+        let log_vals: Vec<f64> = norm_values.iter().map(|v| v.ln()).collect();
+        (log_vals, true)
+    } else {
+        (norm_values.clone(), false)
+    };
+
+    // Step 3: Select strategy from pre-computed characteristics
     let selector = AdaptiveModelSelector::default();
     let strategy =
-        selector.select_optimal_strategy(&norm_values, &norm_timestamps, input.horizon, time_budget as u64);
+        selector.select_strategy_from_characteristics(&characteristics, train_values.len(), time_budget as u64);
 
-    // Step 3: Hierarchical training + ensemble
+    // Step 4: Hierarchical training + ensemble (with detected season period)
     let mut trainer = HierarchicalTrainer::default();
     let (forecast, metadata) = trainer.train_hierarchically(
-        &norm_values,
+        &train_values,
         &norm_timestamps,
         &strategy,
         time_budget,
         input.horizon,
+        season_period,
     )?;
+
+    // Step 5: Inverse transform if log was applied
+    let final_mean = if log_transformed {
+        forecast.mean.iter().map(|v| v.exp()).collect()
+    } else {
+        forecast.mean
+    };
+
+    let final_lower = if log_transformed {
+        forecast.lower_quantile.map(|v| v.iter().map(|x| x.exp()).collect())
+    } else {
+        forecast.lower_quantile
+    };
+
+    let final_upper = if log_transformed {
+        forecast.upper_quantile.map(|v| v.iter().map(|x| x.exp()).collect())
+    } else {
+        forecast.upper_quantile
+    };
 
     let processing_time = start.elapsed().as_secs_f64();
 
     info!(
         strategy = %strategy.strategy_name,
         models = metadata.model_count,
+        log_transformed = log_transformed,
         time = format!("{:.2}s", processing_time),
         "Prediction pipeline complete"
     );
 
     // Convert f64 → Decimal at the boundary
     Ok(ForecastResult {
-        forecast_values: f64s_to_decimals(&forecast.mean)?,
-        lower_bound: forecast
-            .lower_quantile
+        forecast_values: f64s_to_decimals(&final_mean)?,
+        lower_bound: final_lower
             .map(|v| f64s_to_decimals(&v))
             .transpose()?,
-        upper_bound: forecast
-            .upper_quantile
+        upper_bound: final_upper
             .map(|v| f64s_to_decimals(&v))
             .transpose()?,
         model_name: forecast.model_name,
