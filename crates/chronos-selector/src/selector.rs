@@ -413,7 +413,8 @@ fn initialize_strategies() -> HashMap<String, ModelSelectionStrategy> {
 fn adjust_for_short_time(strategy: &ModelSelectionStrategy) -> ModelSelectionStrategy {
     debug!("Adjusting strategy for short time budget");
 
-    let fast_models = ["SeasonalNaive", "AutoETS", "ETS"];
+    // Must match the "fast" category in get_hierarchical_model_groups
+    let fast_models = ["SeasonalNaive", "AutoETS", "ETS", "Theta", "MSTL"];
     let mut priority: Vec<String> = strategy
         .priority_models
         .iter()
@@ -422,7 +423,7 @@ fn adjust_for_short_time(strategy: &ModelSelectionStrategy) -> ModelSelectionStr
         .collect();
 
     if priority.is_empty() {
-        priority = vec!["SeasonalNaive".into(), "AutoETS".into()];
+        priority = vec!["SeasonalNaive".into(), "AutoETS".into(), "MSTL".into()];
     }
 
     let mut excluded = strategy.excluded_models.clone();

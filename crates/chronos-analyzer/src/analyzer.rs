@@ -178,9 +178,9 @@ impl TimeSeriesAnalyzer {
 
         // Frequency = index / n
         let freq = main_freq_idx as f64 / n as f64;
-        // Python uses int() which truncates toward zero, matching floor for positive values
+        // Use rounding for better period estimation (FFT bins are discrete)
         let period = if freq != 0.0 {
-            Some((1.0 / freq) as usize)
+            Some((1.0 / freq).round() as usize)
         } else {
             None
         };
