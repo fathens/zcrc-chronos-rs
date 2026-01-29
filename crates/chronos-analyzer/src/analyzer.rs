@@ -355,9 +355,27 @@ impl TimeSeriesAnalyzer {
         let (_, _, r_log, _, _) = linregress(&x, &log_values);
         let log_r_squared = r_log * r_log;
 
-        // Exponential if log-linear fit is significantly better
-        let is_exp = log_r_squared > 0.8
-            && log_r_squared > linear_r_squared + 0.1;
+        // Exponential if log-linear fit is nearly perfect and significantly better than linear.
+        // Additional check: exponential data has consistent positive curvature (second derivative > 0).
+        // Piecewise linear (changepoint) has zero curvature except at the kink point.
+
+        // Check for consistent positive curvature (characteristic of exponential growth)
+        let second_diffs: Vec<f64> = values
+            .windows(3)
+            .map(|w| (w[2] - w[1]) - (w[1] - w[0]))
+            .collect();
+        let mean_curvature = second_diffs.iter().sum::<f64>() / second_diffs.len() as f64;
+        let positive_curvatures = second_diffs.iter().filter(|&&d| d > 0.0).count();
+        let curvature_ratio = positive_curvatures as f64 / second_diffs.len() as f64;
+
+        // Exponential has consistent positive curvature (most second diffs > 0)
+        // Piecewise linear has mostly zero curvature with a spike at the changepoint
+        if curvature_ratio < 0.7 || mean_curvature < 0.0 {
+            return false;
+        }
+
+        let is_exp = log_r_squared > 0.99
+            && log_r_squared > linear_r_squared + 0.01;
 
         if is_exp {
             debug!(
@@ -1090,6 +1108,61 @@ mod tests {
                 n,
                 period,
                 chars.seasonality.period
+            );
+        }
+    }
+
+    /// Test exponential trend detection for various data lengths.
+    ///
+    /// This is a regression test: exponential_growth_100 was not detected as
+    /// exponential, causing the log transform to be skipped and MASE to be 1.84.
+    #[test]
+    fn test_exponential_trend_detection() {
+        let analyzer = TimeSeriesAnalyzer::new();
+
+        // Test data matching benchmark: 100 * exp(0.02 * i)
+        // Training lengths: 90 (100-10), 180 (200-20), 450 (500-50)
+        for n in [90, 180, 450] {
+            let vals: Vec<f64> = (0..n).map(|i| 100.0 * (0.02 * i as f64).exp()).collect();
+            let ts = uniform_timestamps(n, 3600);
+            let chars = analyzer.analyze(&vals, &ts);
+
+            assert!(
+                chars.trend.is_exponential,
+                "exponential n={}: expected is_exponential=true, linear_r²={:.3}",
+                n,
+                chars.trend.r_squared
+            );
+        }
+    }
+
+    /// Test that changepoint data is NOT detected as exponential.
+    ///
+    /// Changepoint has piecewise linear pattern with slope change in the middle.
+    /// This should NOT trigger exponential detection.
+    #[test]
+    fn test_changepoint_not_exponential() {
+        let analyzer = TimeSeriesAnalyzer::new();
+
+        // Test data matching benchmark: piecewise linear
+        for n in [90, 180, 450] {
+            let mid = n / 2;
+            let vals: Vec<f64> = (0..n)
+                .map(|i| {
+                    if i < mid {
+                        100.0 + 1.0 * i as f64
+                    } else {
+                        100.0 + 1.0 * mid as f64 + 3.0 * (i - mid) as f64
+                    }
+                })
+                .collect();
+            let ts = uniform_timestamps(n, 3600);
+            let chars = analyzer.analyze(&vals, &ts);
+
+            assert!(
+                !chars.trend.is_exponential,
+                "changepoint n={}: expected is_exponential=false",
+                n
             );
         }
     }
