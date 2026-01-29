@@ -318,6 +318,7 @@ fn initialize_strategies() -> HashMap<String, ModelSelectionStrategy> {
             priority_models: vec![
                 "AutoETS".into(),
                 "ETS".into(),
+                "MSTL".into(),
                 "Theta".into(),
                 "SeasonalNaive".into(),
             ],

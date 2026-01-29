@@ -154,3 +154,48 @@ fn test_irregular_strategy() {
         strategy.strategy_name
     );
 }
+
+/// All strategies that may be used for seasonal data should include MSTL.
+/// This is a regression test: small_dataset previously lacked MSTL, causing
+/// poor ensemble performance on multi_seasonal_100.
+#[test]
+fn test_all_strategies_include_key_fast_models() {
+    let strategies = super::initialize_strategies();
+
+    // Strategies that should include MSTL (may encounter seasonal data)
+    let strategies_needing_mstl = [
+        "strong_seasonal",
+        "small_dataset",
+        "balanced",
+    ];
+
+    for name in strategies_needing_mstl {
+        let strategy = strategies.get(name).expect(&format!("Strategy {} not found", name));
+        assert!(
+            strategy.priority_models.iter().any(|m| m == "MSTL"),
+            "Strategy '{}' should include MSTL in priority_models",
+            name
+        );
+    }
+
+    // All fast-category models should be available for short time budgets
+    let fast_models = ["SeasonalNaive", "AutoETS", "ETS", "Theta", "MSTL"];
+    for (name, strategy) in &strategies {
+        // After short-time adjustment, fast models should remain available
+        let adjusted = super::adjust_for_short_time(strategy);
+        for model in fast_models {
+            // Model should either be in priority or not in excluded
+            let in_priority = adjusted.priority_models.iter().any(|m| m == model);
+            let in_excluded = adjusted.excluded_models.iter().any(|m| m == model);
+            // If model is in the original strategy's priority, it should remain after adjustment
+            if strategy.priority_models.iter().any(|m| m == model) {
+                assert!(
+                    in_priority && !in_excluded,
+                    "Strategy '{}': fast model '{}' should not be excluded after short-time adjustment",
+                    name,
+                    model
+                );
+            }
+        }
+    }
+}
