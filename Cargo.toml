@@ -1,29 +1,31 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/chronos-core",
-    "crates/chronos-normalize",
-    "crates/chronos-analyzer",
-    "crates/chronos-selector",
-    "crates/chronos-models",
-    "crates/chronos-trainer",
-    "crates/chronos-predictor",
+    "crates/common",
+    "crates/normalize",
+    "crates/analyzer",
+    "crates/selector",
+    "crates/models",
+    "crates/trainer",
+    "crates/predictor",
+    "crates/bench",
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
 # Internal crates
-chronos-core = { path = "crates/chronos-core" }
-chronos-normalize = { path = "crates/chronos-normalize" }
-chronos-analyzer = { path = "crates/chronos-analyzer" }
-chronos-selector = { path = "crates/chronos-selector" }
-chronos-models = { path = "crates/chronos-models" }
-chronos-trainer = { path = "crates/chronos-trainer" }
-chronos-predictor = { path = "crates/chronos-predictor" }
+common = { path = "crates/common" }
+normalize = { path = "crates/normalize" }
+analyzer = { path = "crates/analyzer" }
+selector = { path = "crates/selector" }
+models = { path = "crates/models" }
+trainer = { path = "crates/trainer" }
+predictor = { path = "crates/predictor" }
+bench = { path = "crates/bench" }
 
 # Date/Time
 chrono = { version = "0.4", features = ["serde"] }

@@ -1,0 +1,19 @@
+[package]
+name = "bench"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+common = { workspace = true }
+normalize = { workspace = true }
+analyzer = { workspace = true }
+selector = { workspace = true }
+models = { workspace = true }
+trainer = { workspace = true }
+predictor = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rusty-hook = "0.11"
+tracing-subscriber = { workspace = true }

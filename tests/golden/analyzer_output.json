@@ -874,7 +874,7 @@
       },
       "seasonality": {
         "strength": "weak",
-        "period": 11,
+        "period": 12,
         "score": 0.022500539608001274,
         "dominant_frequency": 0.085
       },
@@ -1327,7 +1327,7 @@
       },
       "seasonality": {
         "strength": "strong",
-        "period": 11,
+        "period": 12,
         "score": 0.33061607435168355,
         "dominant_frequency": 0.085
       },
