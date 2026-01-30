@@ -1,6 +1,8 @@
-use common::{decimals_to_f64s, f64s_to_decimals, BigDecimal, ForecastModel, ForecastOutput};
+use chrono::{NaiveDateTime, TimeDelta};
+use common::{decimals_to_f64s, BigDecimal, ForecastModel, ForecastOutput};
 use models::{EtsModel, MstlEtsModel, NptsModel, SeasonalNaiveModel, ThetaModel};
 use predictor::{predict, PredictionInput};
+use std::collections::BTreeMap;
 use tracing::{debug, warn};
 
 use crate::data_generator::TimeSeriesFixture;
@@ -127,20 +129,24 @@ fn run_single_model(
 }
 
 fn run_ensemble_pipeline(fixture: &TimeSeriesFixture) -> Option<ForecastOutput> {
-    // Convert f64 to BigDecimal for predict() pipeline
-    let values: Vec<BigDecimal> = match f64s_to_decimals(&fixture.train_values) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(error = %e, fixture = %fixture.name, "Failed to convert values");
-            return None;
-        }
-    };
+    // Convert f64 to BigDecimal and build BTreeMap
+    let data: BTreeMap<NaiveDateTime, BigDecimal> = fixture
+        .train_timestamps
+        .iter()
+        .zip(&fixture.train_values)
+        .map(|(ts, val)| match BigDecimal::try_from(*val) {
+            Ok(bd) => (*ts, bd),
+            Err(_) => (*ts, BigDecimal::from(0)),
+        })
+        .collect();
+
+    // Calculate median interval to determine horizon
+    let median_interval = calculate_median_interval(&fixture.train_timestamps);
+    let horizon_duration = TimeDelta::seconds(median_interval * fixture.horizon as i64);
 
     let input = PredictionInput {
-        timestamps: fixture.train_timestamps.clone(),
-        values,
-        horizon: fixture.horizon,
-        time_budget_secs: Some(60.0),
+        data,
+        horizon: horizon_duration,
     };
 
     match predict(&input) {
@@ -169,6 +175,20 @@ fn run_ensemble_pipeline(fixture: &TimeSeriesFixture) -> Option<ForecastOutput> 
             None
         }
     }
+}
+
+/// Calculate median interval between timestamps in seconds.
+fn calculate_median_interval(timestamps: &[NaiveDateTime]) -> i64 {
+    if timestamps.len() < 2 {
+        return 3600; // Default to 1 hour
+    }
+
+    let mut intervals: Vec<i64> = timestamps
+        .windows(2)
+        .map(|w| (w[1] - w[0]).num_seconds())
+        .collect();
+    intervals.sort();
+    intervals[intervals.len() / 2]
 }
 
 /// Run backtests on all provided fixtures.
