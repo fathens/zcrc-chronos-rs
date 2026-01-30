@@ -64,7 +64,7 @@ fn run_pipeline(train_values: &[f64], horizon: usize) -> Vec<f64> {
     let result = predict(&input).expect("pipeline should succeed");
     result
         .forecast_values
-        .iter()
+        .values()
         .map(|v| v.to_string().parse::<f64>().unwrap())
         .collect()
 }
