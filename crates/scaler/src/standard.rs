@@ -22,9 +22,17 @@ impl StandardScaler {
         }
     }
 
-    /// Returns true if the fitted series is constant (std ≈ 0).
+    /// Returns true if the fitted series is constant (std ≈ 0 relative to scale).
+    /// Uses relative comparison to handle data at any scale.
     pub fn is_constant(&self) -> bool {
-        self.std.map(|s| s < Self::EPSILON).unwrap_or(false)
+        match (self.mean, self.std) {
+            (Some(mean), Some(std)) => {
+                // Use relative epsilon based on the data scale
+                let scale = mean.abs().max(Self::EPSILON);
+                std < Self::EPSILON * scale
+            }
+            _ => false,
+        }
     }
 
     /// Returns the fitted mean, if available.
@@ -70,7 +78,9 @@ impl Scaler for StandardScaler {
             .std
             .ok_or_else(|| ChronosError::InvalidInput("Scaler not fitted".into()))?;
 
-        if std < Self::EPSILON {
+        // Use relative epsilon based on data scale
+        let scale = mean.abs().max(Self::EPSILON);
+        if std < Self::EPSILON * scale {
             return Ok(vec![0.0; values.len()]);
         }
 
@@ -85,7 +95,9 @@ impl Scaler for StandardScaler {
             .std
             .ok_or_else(|| ChronosError::InvalidInput("Scaler not fitted".into()))?;
 
-        if std < Self::EPSILON {
+        // Use relative epsilon based on data scale
+        let scale = mean.abs().max(Self::EPSILON);
+        if std < Self::EPSILON * scale {
             return Ok(vec![mean; values.len()]);
         }
 

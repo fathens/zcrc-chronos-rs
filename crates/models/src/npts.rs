@@ -178,4 +178,100 @@ mod tests {
         let output = model.fit_predict(&values, &ts, 2).unwrap();
         assert_eq!(output.mean.len(), 2);
     }
+
+    /// Test that NPTS produces scale-invariant relative predictions.
+    /// Without scaling, at tiny scales the epsilon (1e-10) in weight calculation
+    /// dominates the actual distances, causing uniform weighting.
+    #[test]
+    fn test_npts_scale_invariance() {
+        // Create data where neighbors have different distances (no exact matches)
+        // The query pattern slightly differs from all historical patterns
+        let mut base_pattern = Vec::new();
+        for i in 0..50 {
+            // Sinusoidal with slight drift - no exact repeats
+            base_pattern.push(100.0 + 10.0 * (i as f64 * 0.3).sin() + i as f64 * 0.1);
+        }
+        let ts = make_timestamps(base_pattern.len());
+
+        // At scale 1.0: distances are meaningful
+        // At scale 1e-11: distances become ~1e-10, same order as epsilon
+        let scales = [1.0, 1e-11];
+        let mut predictions: Vec<Vec<f64>> = Vec::new();
+
+        for &scale in &scales {
+            let scaled: Vec<f64> = base_pattern.iter().map(|v| v * scale).collect();
+            let mut model = NptsModel::new(Some(5));
+            let output = model.fit_predict(&scaled, &ts, 3).unwrap();
+            // Convert to relative scale for comparison
+            let rel_pred: Vec<f64> = output.mean.iter().map(|v| v / scale).collect();
+            predictions.push(rel_pred);
+        }
+
+        // With proper scaling, both should produce identical relative predictions
+        let max_diff: f64 = predictions[0]
+            .iter()
+            .zip(predictions[1].iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+
+        assert!(
+            max_diff < 0.001,
+            "Scale invariance violated: predictions differ by {:.6} (scale1: {:?}, scale1e-11: {:?})",
+            max_diff,
+            predictions[0],
+            predictions[1]
+        );
+    }
+
+    /// Test NPTS with extremely small values (typical crypto prices).
+    #[test]
+    fn test_npts_extreme_small_scale() {
+        // Simulating NEAR protocol-like prices: ~4e-9
+        let values: Vec<f64> = (0..100)
+            .map(|i| {
+                let base = 4e-9;
+                let variation = (i as f64 * 0.1).sin() * 1e-9;
+                base + variation
+            })
+            .collect();
+        let ts = make_timestamps(100);
+
+        let mut model = NptsModel::new(Some(5));
+        let output = model.fit_predict(&values, &ts, 10).unwrap();
+
+        // Predictions should be in reasonable range
+        for pred in &output.mean {
+            assert!(
+                *pred > 1e-10 && *pred < 1e-7,
+                "Prediction {} out of expected range for small scale data",
+                pred
+            );
+        }
+    }
+
+    /// Test NPTS with extremely large values.
+    #[test]
+    fn test_npts_extreme_large_scale() {
+        // Large values like Bitcoin market cap
+        let values: Vec<f64> = (0..100)
+            .map(|i| {
+                let base = 1e12;
+                let variation = (i as f64 * 0.1).sin() * 1e11;
+                base + variation
+            })
+            .collect();
+        let ts = make_timestamps(100);
+
+        let mut model = NptsModel::new(Some(5));
+        let output = model.fit_predict(&values, &ts, 10).unwrap();
+
+        // Predictions should be in reasonable range
+        for pred in &output.mean {
+            assert!(
+                *pred > 1e11 && *pred < 1e13,
+                "Prediction {} out of expected range for large scale data",
+                pred
+            );
+        }
+    }
 }
