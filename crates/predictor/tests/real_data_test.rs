@@ -219,35 +219,33 @@ macro_rules! real_data_test {
 }
 
 // Generate tests for each pattern with appropriate thresholds
-// Stable patterns: tighter thresholds
-real_data_test!(test_uptrend_accuracy, "uptrend.json", 50.0);
-real_data_test!(test_downtrend_accuracy, "downtrend.json", 50.0);
-real_data_test!(test_low_volatility_accuracy, "low_volatility.json", 30.0);
-real_data_test!(test_range_accuracy, "range.json", 30.0);
-real_data_test!(test_gradual_change_accuracy, "gradual_change.json", 50.0);
-real_data_test!(test_double_bottom_accuracy, "double_bottom.json", 50.0);
-
-// Volatile patterns: looser thresholds
-real_data_test!(test_high_volatility_accuracy, "high_volatility.json", 100.0);
-real_data_test!(test_spike_up_accuracy, "spike_up.json", 100.0);
-real_data_test!(test_spike_down_accuracy, "spike_down.json", 100.0);
-real_data_test!(test_v_recovery_accuracy, "v_recovery.json", 100.0);
+// Thresholds set to ~2.5x current MAPE, rounded to nearest 5%
+real_data_test!(test_uptrend_accuracy, "uptrend.json", 5.0);
+real_data_test!(test_downtrend_accuracy, "downtrend.json", 15.0);
+real_data_test!(test_low_volatility_accuracy, "low_volatility.json", 10.0);
+real_data_test!(test_range_accuracy, "range.json", 5.0);
+real_data_test!(test_gradual_change_accuracy, "gradual_change.json", 25.0);
+real_data_test!(test_double_bottom_accuracy, "double_bottom.json", 5.0);
+real_data_test!(test_high_volatility_accuracy, "high_volatility.json", 50.0);
+real_data_test!(test_spike_up_accuracy, "spike_up.json", 5.0);
+real_data_test!(test_spike_down_accuracy, "spike_down.json", 15.0);
+real_data_test!(test_v_recovery_accuracy, "v_recovery.json", 30.0);
 
 /// Run all patterns and produce a summary report.
 #[test]
 #[ignore]
 fn test_all_patterns_summary() {
     let patterns = [
-        ("uptrend.json", 50.0),
-        ("downtrend.json", 50.0),
-        ("low_volatility.json", 30.0),
-        ("range.json", 30.0),
-        ("gradual_change.json", 50.0),
-        ("double_bottom.json", 50.0),
-        ("high_volatility.json", 100.0),
-        ("spike_up.json", 100.0),
-        ("spike_down.json", 100.0),
-        ("v_recovery.json", 100.0),
+        ("uptrend.json", 5.0),
+        ("downtrend.json", 15.0),
+        ("low_volatility.json", 10.0),
+        ("range.json", 5.0),
+        ("gradual_change.json", 25.0),
+        ("double_bottom.json", 5.0),
+        ("high_volatility.json", 50.0),
+        ("spike_up.json", 5.0),
+        ("spike_down.json", 15.0),
+        ("v_recovery.json", 30.0),
     ];
 
     println!();
