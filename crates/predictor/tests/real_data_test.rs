@@ -39,6 +39,34 @@ fn real_data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/real")
 }
 
+/// Find all data files for a pattern (e.g., "uptrend" → ["uptrend-01.json", "uptrend-02.json", ...]).
+fn find_pattern_files(pattern: &str) -> Vec<String> {
+    let dir = real_data_dir();
+    let prefix = format!("{}-", pattern);
+
+    let mut files: Vec<String> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("Failed to read directory {}: {}", dir.display(), e))
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix) && name.ends_with(".json") {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    files.sort(); // Ensure consistent ordering: -01, -02, -03, ...
+    assert!(
+        !files.is_empty(),
+        "No data files found for pattern '{}' (expected {}-*.json)",
+        pattern,
+        pattern
+    );
+    files
+}
+
 /// Load and parse a real data JSON file.
 fn load_real_data(filename: &str) -> RealDataFile {
     let path = real_data_dir().join(filename);
@@ -191,28 +219,40 @@ fn run_real_data_test(filename: &str) -> TestResult {
 }
 
 /// Macro to generate individual test functions for each pattern.
+/// Tests all files matching the pattern (e.g., "uptrend" tests uptrend-01.json, uptrend-02.json, ...).
 macro_rules! real_data_test {
-    ($name:ident, $file:expr, $threshold:expr) => {
+    ($name:ident, $pattern:expr, $threshold:expr) => {
         #[test]
         #[ignore]
         fn $name() {
-            let result = run_real_data_test($file);
+            let files = find_pattern_files($pattern);
+            let mut all_passed = true;
+
             println!();
-            println!("Pattern: {}", $file);
-            println!("Description: {}", result.description);
-            println!("Data points used: {}", result.data_points_used);
-            println!(
-                "Forecast: {:.6e}, Actual: {:.6e}",
-                result.forecast, result.actual
-            );
-            println!("MAPE: {:.2}%", result.mape);
+            println!("Pattern: {} ({} files)", $pattern, files.len());
+            println!("{}", "-".repeat(60));
+
+            for file in &files {
+                let result = run_real_data_test(file);
+                let passed = result.mape < $threshold;
+                let status = if passed { "PASS" } else { "FAIL" };
+
+                println!("  {} ({})", file, result.description);
+                println!(
+                    "    {} points, MAPE={:.2}% (threshold={:.0}%) [{}]",
+                    result.data_points_used, result.mape, $threshold, status
+                );
+
+                if !passed {
+                    all_passed = false;
+                }
+            }
+
             println!();
             assert!(
-                result.mape < $threshold,
-                "MAPE {:.2}% exceeds threshold {:.2}% for {}",
-                result.mape,
-                $threshold,
-                $file
+                all_passed,
+                "One or more files in pattern '{}' exceeded MAPE threshold {:.0}%",
+                $pattern, $threshold
             );
         }
     };
@@ -220,79 +260,84 @@ macro_rules! real_data_test {
 
 // Generate tests for each pattern with appropriate thresholds
 // Thresholds set to ~2.5x current MAPE, rounded to nearest 5%
-real_data_test!(test_uptrend_accuracy, "uptrend.json", 5.0);
-real_data_test!(test_downtrend_accuracy, "downtrend.json", 15.0);
-real_data_test!(test_low_volatility_accuracy, "low_volatility.json", 10.0);
-real_data_test!(test_range_accuracy, "range.json", 5.0);
-real_data_test!(test_gradual_change_accuracy, "gradual_change.json", 25.0);
-real_data_test!(test_double_bottom_accuracy, "double_bottom.json", 5.0);
-real_data_test!(test_high_volatility_accuracy, "high_volatility.json", 50.0);
-real_data_test!(test_spike_up_accuracy, "spike_up.json", 5.0);
-real_data_test!(test_spike_down_accuracy, "spike_down.json", 15.0);
-real_data_test!(test_v_recovery_accuracy, "v_recovery.json", 30.0);
+// Each pattern may have multiple data files (-01, -02, etc.)
+real_data_test!(test_uptrend_accuracy, "uptrend", 5.0);
+real_data_test!(test_downtrend_accuracy, "downtrend", 15.0);
+real_data_test!(test_low_volatility_accuracy, "low_volatility", 10.0);
+real_data_test!(test_range_accuracy, "range", 5.0);
+real_data_test!(test_gradual_change_accuracy, "gradual_change", 25.0);
+real_data_test!(test_double_bottom_accuracy, "double_bottom", 5.0);
+real_data_test!(test_high_volatility_accuracy, "high_volatility", 50.0);
+real_data_test!(test_spike_up_accuracy, "spike_up", 5.0);
+real_data_test!(test_spike_down_accuracy, "spike_down", 15.0);
+real_data_test!(test_v_recovery_accuracy, "v_recovery", 30.0);
 
 /// Run all patterns and produce a summary report.
 #[test]
 #[ignore]
 fn test_all_patterns_summary() {
     let patterns = [
-        ("uptrend.json", 5.0),
-        ("downtrend.json", 15.0),
-        ("low_volatility.json", 10.0),
-        ("range.json", 5.0),
-        ("gradual_change.json", 25.0),
-        ("double_bottom.json", 5.0),
-        ("high_volatility.json", 50.0),
-        ("spike_up.json", 5.0),
-        ("spike_down.json", 15.0),
-        ("v_recovery.json", 30.0),
+        ("uptrend", 5.0),
+        ("downtrend", 15.0),
+        ("low_volatility", 10.0),
+        ("range", 5.0),
+        ("gradual_change", 25.0),
+        ("double_bottom", 5.0),
+        ("high_volatility", 50.0),
+        ("spike_up", 5.0),
+        ("spike_down", 15.0),
+        ("v_recovery", 30.0),
     ];
 
     println!();
     println!("=== Real Data Prediction Accuracy Summary ===");
     println!();
     println!(
-        "{:<20} {:>12} {:>12} {:>10} {:>10} {:>8}",
-        "Pattern", "Forecast", "Actual", "MAPE%", "Threshold", "Status"
+        "{:<25} {:>12} {:>12} {:>10} {:>10} {:>8}",
+        "File", "Forecast", "Actual", "MAPE%", "Threshold", "Status"
     );
-    println!("{}", "-".repeat(80));
+    println!("{}", "-".repeat(85));
 
     let mut passed = 0;
     let mut failed = 0;
     let mut total_mape = 0.0;
+    let mut total_files = 0;
 
-    for (filename, threshold) in &patterns {
-        let result = run_real_data_test(filename);
-        let status = if result.mape < *threshold {
-            passed += 1;
-            "PASS"
-        } else {
-            failed += 1;
-            "FAIL"
-        };
-        total_mape += result.mape;
+    for (pattern, threshold) in &patterns {
+        let files = find_pattern_files(pattern);
 
-        let name = filename.trim_end_matches(".json");
-        println!(
-            "{:<20} {:>12.4e} {:>12.4e} {:>10.2} {:>10.0} {:>8}",
-            name, result.forecast, result.actual, result.mape, threshold, status
-        );
+        for file in &files {
+            let result = run_real_data_test(file);
+            let status = if result.mape < *threshold {
+                passed += 1;
+                "PASS"
+            } else {
+                failed += 1;
+                "FAIL"
+            };
+            total_mape += result.mape;
+            total_files += 1;
+
+            let name = file.trim_end_matches(".json");
+            println!(
+                "{:<25} {:>12.4e} {:>12.4e} {:>10.2} {:>10.0} {:>8}",
+                name, result.forecast, result.actual, result.mape, threshold, status
+            );
+        }
     }
 
-    println!("{}", "-".repeat(80));
+    println!("{}", "-".repeat(85));
     println!(
         "Total: {} passed, {} failed, Average MAPE: {:.2}%",
         passed,
         failed,
-        total_mape / patterns.len() as f64
+        total_mape / total_files as f64
     );
     println!();
 
     assert_eq!(
-        failed,
-        0,
-        "{} out of {} patterns failed their MAPE thresholds",
-        failed,
-        patterns.len()
+        failed, 0,
+        "{} out of {} files failed their MAPE thresholds",
+        failed, total_files
     );
 }
