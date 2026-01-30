@@ -213,7 +213,11 @@ fn run_real_data_test(filename: &str) -> TestResult {
         }
     };
 
-    let forecast_value: f64 = result.forecast_values[0]
+    let forecast_value: f64 = result
+        .forecast_values
+        .values()
+        .next()
+        .expect("No forecast values")
         .to_string()
         .parse()
         .expect("Failed to parse forecast value");

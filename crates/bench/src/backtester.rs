@@ -151,8 +151,9 @@ fn run_ensemble_pipeline(fixture: &TimeSeriesFixture) -> Option<ForecastOutput> 
 
     match predict(&input) {
         Ok(result) => {
-            // Convert BigDecimal back to f64
-            let mean = match decimals_to_f64s(&result.forecast_values) {
+            // Convert BigDecimal back to f64 (extract values from BTreeMap)
+            let forecast_values: Vec<_> = result.forecast_values.values().cloned().collect();
+            let mean = match decimals_to_f64s(&forecast_values) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(error = %e, fixture = %fixture.name, "Failed to convert forecast");
@@ -160,8 +161,14 @@ fn run_ensemble_pipeline(fixture: &TimeSeriesFixture) -> Option<ForecastOutput> 
                 }
             };
 
-            let lower_quantile = result.lower_bound.and_then(|lb| decimals_to_f64s(&lb).ok());
-            let upper_quantile = result.upper_bound.and_then(|ub| decimals_to_f64s(&ub).ok());
+            let lower_quantile = result.lower_bound.and_then(|lb| {
+                let values: Vec<_> = lb.values().cloned().collect();
+                decimals_to_f64s(&values).ok()
+            });
+            let upper_quantile = result.upper_bound.and_then(|ub| {
+                let values: Vec<_> = ub.values().cloned().collect();
+                decimals_to_f64s(&values).ok()
+            });
 
             Some(ForecastOutput {
                 mean,
