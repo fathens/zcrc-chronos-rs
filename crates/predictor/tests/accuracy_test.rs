@@ -3,22 +3,25 @@
 
 use chrono::NaiveDate;
 use chrono::NaiveDateTime;
+use chrono::TimeDelta;
 use common::BigDecimal;
 use num_traits::FromPrimitive;
+use std::collections::BTreeMap;
 
-fn make_timestamps(n: usize) -> Vec<NaiveDateTime> {
+fn make_data(values: &[f64]) -> BTreeMap<NaiveDateTime, BigDecimal> {
     let base = NaiveDate::from_ymd_opt(2024, 1, 1)
         .unwrap()
         .and_hms_opt(0, 0, 0)
         .unwrap();
-    (0..n)
-        .map(|i| base + chrono::Duration::hours(i as i64))
-        .collect()
-}
 
-fn to_decimals(vals: &[f64]) -> Vec<BigDecimal> {
-    vals.iter()
-        .map(|&v| BigDecimal::from_f64(v).unwrap())
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            let ts = base + TimeDelta::hours(i as i64);
+            let val = BigDecimal::from_f64(v).unwrap();
+            (ts, val)
+        })
         .collect()
 }
 
@@ -54,10 +57,8 @@ fn run_pipeline(train_values: &[f64], horizon: usize) -> Vec<f64> {
     use predictor::{predict, PredictionInput};
 
     let input = PredictionInput {
-        timestamps: make_timestamps(train_values.len()),
-        values: to_decimals(train_values),
-        horizon,
-        time_budget_secs: Some(60.0),
+        data: make_data(train_values),
+        horizon: TimeDelta::hours(horizon as i64),
     };
 
     let result = predict(&input).expect("pipeline should succeed");

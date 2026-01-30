@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
+
 use analyzer::TimeSeriesAnalyzer;
-use chrono::NaiveDateTime;
+use chrono::{NaiveDateTime, TimeDelta};
 use common::{decimals_to_f64s, f64s_to_decimals, BigDecimal, ChronosError, Result};
 use normalize::normalize_time_series_data;
 use selector::AdaptiveModelSelector;
@@ -10,10 +12,12 @@ use trainer::HierarchicalTrainer;
 /// Input for the prediction pipeline.
 #[derive(Debug, Clone)]
 pub struct PredictionInput {
-    pub timestamps: Vec<NaiveDateTime>,
-    pub values: Vec<BigDecimal>,
-    pub horizon: usize,
-    pub time_budget_secs: Option<f64>,
+    /// Time-series data as timestamp → value mapping.
+    /// BTreeMap ensures data is always sorted by timestamp.
+    pub data: BTreeMap<NaiveDateTime, BigDecimal>,
+
+    /// Forecast horizon as a duration (e.g., 24 hours ahead).
+    pub horizon: TimeDelta,
 }
 
 /// Full result of a prediction.
@@ -35,6 +39,33 @@ pub struct ForecastResult {
     pub model_count: usize,
 }
 
+/// Convert TimeDelta to steps based on median sampling interval.
+fn horizon_to_steps(horizon: &TimeDelta, timestamps: &[NaiveDateTime]) -> usize {
+    if timestamps.len() < 2 {
+        return 1;
+    }
+
+    // Calculate median sampling interval
+    let mut intervals: Vec<i64> = timestamps
+        .windows(2)
+        .map(|w| (w[1] - w[0]).num_seconds())
+        .collect();
+    intervals.sort();
+    let median_interval = intervals[intervals.len() / 2];
+
+    // Convert horizon to steps (minimum 1)
+    let steps = (horizon.num_seconds() / median_interval.max(1)) as usize;
+    steps.max(1)
+}
+
+/// Calculate time budget based on data size.
+fn calculate_time_budget(data_len: usize) -> f64 {
+    // Base 60s, +10s per 100 points, max 900s
+    let base = 60.0;
+    let per_100_points = 10.0;
+    (base + (data_len as f64 / 100.0) * per_100_points).min(900.0)
+}
+
 /// Main prediction entry point.
 ///
 /// Pipeline: normalize → analyze → (log transform if exponential) → select strategy → train models → ensemble → (exp transform).
@@ -42,37 +73,39 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
     let start = std::time::Instant::now();
 
     // Validate input
-    if input.timestamps.len() != input.values.len() {
-        return Err(ChronosError::InvalidInput(
-            "timestamps and values must have the same length".into(),
-        ));
-    }
-    if input.values.len() < 2 {
+    if input.data.len() < 2 {
         return Err(ChronosError::InsufficientData(
             "At least 2 data points required".into(),
         ));
     }
-    if input.horizon == 0 {
+    if input.horizon <= TimeDelta::zero() {
         return Err(ChronosError::InvalidInput(
             "horizon must be positive".into(),
         ));
     }
 
-    // Convert Decimal → f64 at the boundary (NaN/Inf cannot exist in Decimal)
-    let f64_values = decimals_to_f64s(&input.values)?;
+    // Extract sorted data from BTreeMap
+    let (timestamps, decimal_values): (Vec<_>, Vec<_>) = input
+        .data
+        .iter()
+        .map(|(ts, val)| (*ts, val.clone()))
+        .unzip();
 
-    let time_budget = input.time_budget_secs.unwrap_or(900.0);
+    // Convert Decimal → f64 at the boundary (NaN/Inf cannot exist in Decimal)
+    let f64_values = decimals_to_f64s(&decimal_values)?;
+
+    // Auto-calculate time budget based on data size
+    let time_budget = calculate_time_budget(input.data.len());
 
     info!(
-        data_points = input.values.len(),
-        horizon = input.horizon,
+        data_points = input.data.len(),
+        horizon = %input.horizon,
         time_budget = format!("{:.0}s", time_budget),
         "Starting prediction pipeline"
     );
 
     // Step 1: Normalize
-    let (norm_timestamps, norm_values) =
-        normalize_time_series_data(&input.timestamps, &f64_values)?;
+    let (norm_timestamps, norm_values) = normalize_time_series_data(&timestamps, &f64_values)?;
 
     // Step 2: Analyze characteristics (run once, share with selector and trainer)
     let analyzer = TimeSeriesAnalyzer::new();
@@ -97,6 +130,9 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
         time_budget as u64,
     );
 
+    // Convert horizon from TimeDelta to steps
+    let horizon_steps = horizon_to_steps(&input.horizon, &norm_timestamps);
+
     // Step 4: Hierarchical training + ensemble (with detected season period)
     let mut trainer = HierarchicalTrainer::default();
     let (forecast, metadata) = trainer.train_hierarchically(
@@ -104,7 +140,7 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
         &norm_timestamps,
         &strategy,
         time_budget,
-        input.horizon,
+        horizon_steps,
         season_period,
     )?;
 

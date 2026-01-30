@@ -5,11 +5,12 @@
 //!
 //! Run with: cargo test -p predictor --test real_data_test -- --ignored --nocapture
 
-use chrono::NaiveDateTime;
+use chrono::{NaiveDateTime, TimeDelta};
 use common::BigDecimal;
 use num_traits::FromPrimitive;
 use predictor::{predict, PredictionInput};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -105,10 +106,10 @@ struct TestResult {
 /// The normalize module now handles large time gaps correctly, so full data
 /// can be used if needed.
 fn run_real_data_test(filename: &str) -> TestResult {
-    let data = load_real_data(filename);
+    let file_data = load_real_data(filename);
 
     // Parse all timestamps and prices
-    let parsed: Vec<(NaiveDateTime, f64)> = data
+    let parsed: Vec<(NaiveDateTime, f64)> = file_data
         .data
         .iter()
         .map(|dp| {
@@ -168,11 +169,10 @@ fn run_real_data_test(filename: &str) -> TestResult {
     let sampled_train: Vec<&(NaiveDateTime, f64)> =
         train_data.iter().step_by(step).cloned().collect();
 
-    // Prepare training data
-    let timestamps: Vec<NaiveDateTime> = sampled_train.iter().map(|(ts, _)| *ts).collect();
-    let values: Vec<BigDecimal> = sampled_train
+    // Prepare training data as BTreeMap
+    let data: BTreeMap<NaiveDateTime, BigDecimal> = sampled_train
         .iter()
-        .map(|(_, price)| BigDecimal::from_f64(*price).unwrap())
+        .map(|(ts, price)| (*ts, BigDecimal::from_f64(*price).unwrap()))
         .collect();
 
     // Debug info
@@ -187,12 +187,23 @@ fn run_real_data_test(filename: &str) -> TestResult {
         max_price,
     );
 
-    // Run prediction with horizon=1 (one time step ahead)
+    // Calculate median interval to determine horizon
+    let timestamps: Vec<_> = sampled_train.iter().map(|(ts, _)| *ts).collect();
+    let median_interval = if timestamps.len() >= 2 {
+        let mut intervals: Vec<i64> = timestamps
+            .windows(2)
+            .map(|w| (w[1] - w[0]).num_seconds())
+            .collect();
+        intervals.sort();
+        intervals[intervals.len() / 2]
+    } else {
+        3600 // Default to 1 hour
+    };
+
+    // Run prediction with horizon = 1 step (using the median interval)
     let input = PredictionInput {
-        timestamps,
-        values,
-        horizon: 1,
-        time_budget_secs: Some(120.0),
+        data,
+        horizon: TimeDelta::seconds(median_interval),
     };
 
     let result = match predict(&input) {
@@ -213,7 +224,7 @@ fn run_real_data_test(filename: &str) -> TestResult {
         forecast: forecast_value,
         actual: actual_value,
         mape,
-        description: data.description,
+        description: file_data.description,
         data_points_used: train_data.len(),
     }
 }
