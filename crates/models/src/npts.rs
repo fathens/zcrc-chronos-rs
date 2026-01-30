@@ -1,5 +1,6 @@
 use chrono::NaiveDateTime;
 use common::{ChronosError, ForecastModel, ForecastOutput, ModelCategory, Result};
+use scaler::{Scaler, StandardScaler};
 use tracing::debug;
 
 /// NPTS (Non-Parametric Time Series) model.
@@ -44,9 +45,13 @@ impl ForecastModel for NptsModel {
             ));
         }
 
+        // Normalize values for distance calculation
+        let mut scaler = StandardScaler::new();
+        let normalized = scaler.fit_transform(values)?;
+
         // Use the last `context_len` values as the query pattern
         let context_len = horizon.min(n / 2).max(1);
-        let query = &values[n - context_len..];
+        let query = &normalized[n - context_len..];
 
         debug!(
             k = self.k,
@@ -69,10 +74,10 @@ impl ForecastModel for NptsModel {
             });
         }
 
-        // Compute distances for all valid windows
+        // Compute distances for all valid windows (on normalized values)
         let mut candidates: Vec<(usize, f64)> = (0..=max_start)
             .map(|start| {
-                let window = &values[start..start + context_len];
+                let window = &normalized[start..start + context_len];
                 let dist = euclidean_distance(query, window);
                 (start, dist)
             })
@@ -87,22 +92,25 @@ impl ForecastModel for NptsModel {
         let weights: Vec<f64> = top_k.iter().map(|(_, d)| 1.0 / (d + 1e-10)).collect();
         let total_weight: f64 = weights.iter().sum();
 
-        // Weighted average of the subsequent values
-        let mut mean = vec![0.0; horizon];
+        // Weighted average of the subsequent values (on normalized values)
+        let mut mean_normalized = vec![0.0; horizon];
         for (idx, &(start, _)) in top_k.iter().enumerate() {
             let forecast_start = start + context_len;
             let w = weights[idx] / total_weight;
-            for (h, mean_val) in mean.iter_mut().enumerate() {
+            for (h, mean_val) in mean_normalized.iter_mut().enumerate() {
                 let source_idx = forecast_start + h;
                 let val = if source_idx < n {
-                    values[source_idx]
+                    normalized[source_idx]
                 } else {
                     // If we run out of future values, use the last available
-                    values[n - 1]
+                    normalized[n - 1]
                 };
                 *mean_val += w * val;
             }
         }
+
+        // Inverse transform to original scale
+        let mean = scaler.inverse_transform(&mean_normalized)?;
 
         Ok(ForecastOutput {
             mean,

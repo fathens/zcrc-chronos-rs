@@ -5,6 +5,7 @@ members = [
     "crates/normalize",
     "crates/analyzer",
     "crates/selector",
+    "crates/scaler",
     "crates/models",
     "crates/trainer",
     "crates/predictor",
@@ -22,6 +23,7 @@ common = { path = "crates/common" }
 normalize = { path = "crates/normalize" }
 analyzer = { path = "crates/analyzer" }
 selector = { path = "crates/selector" }
+scaler = { path = "crates/scaler" }
 models = { path = "crates/models" }
 trainer = { path = "crates/trainer" }
 predictor = { path = "crates/predictor" }
