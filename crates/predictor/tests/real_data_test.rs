@@ -282,7 +282,7 @@ real_data_test!(test_low_volatility_accuracy, "low_volatility", 10.0);
 real_data_test!(test_range_accuracy, "range", 5.0);
 real_data_test!(test_gradual_change_accuracy, "gradual_change", 25.0);
 real_data_test!(test_double_bottom_accuracy, "double_bottom", 5.0);
-real_data_test!(test_high_volatility_accuracy, "high_volatility", 50.0);
+real_data_test!(test_high_volatility_accuracy, "high_volatility", 30.0);
 real_data_test!(test_spike_up_accuracy, "spike_up", 5.0);
 real_data_test!(test_spike_down_accuracy, "spike_down", 15.0);
 real_data_test!(test_v_recovery_accuracy, "v_recovery", 30.0);
@@ -298,7 +298,7 @@ fn test_all_patterns_summary() {
         ("range", 5.0),
         ("gradual_change", 25.0),
         ("double_bottom", 5.0),
-        ("high_volatility", 50.0),
+        ("high_volatility", 30.0),
         ("spike_up", 5.0),
         ("spike_down", 15.0),
         ("v_recovery", 30.0),
