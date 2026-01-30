@@ -84,6 +84,39 @@ fn compute_mape(forecast: f64, actual: f64) -> f64 {
     ((forecast - actual) / actual).abs() * 100.0
 }
 
+/// Get forecast value at target timestamp, with linear interpolation if needed.
+fn get_forecast_at_timestamp(
+    forecast_values: &BTreeMap<NaiveDateTime, BigDecimal>,
+    target_ts: NaiveDateTime,
+) -> Option<f64> {
+    // Exact match check
+    if let Some(val) = forecast_values.get(&target_ts) {
+        return val.to_string().parse().ok();
+    }
+
+    // Get values before and after target timestamp
+    let before: Option<(&NaiveDateTime, &BigDecimal)> =
+        forecast_values.range(..target_ts).next_back();
+    let after: Option<(&NaiveDateTime, &BigDecimal)> = forecast_values.range(target_ts..).next();
+
+    match (before, after) {
+        (Some((ts1, v1)), Some((ts2, v2))) => {
+            // Linear interpolation
+            let v1: f64 = v1.to_string().parse().ok()?;
+            let v2: f64 = v2.to_string().parse().ok()?;
+            let total_secs = (*ts2 - *ts1).num_seconds() as f64;
+            let elapsed_secs = (target_ts - *ts1).num_seconds() as f64;
+            let ratio = elapsed_secs / total_secs;
+            Some(v1 + ratio * (v2 - v1))
+        }
+        (Some((_, v)), None) | (None, Some((_, v))) => {
+            // Out of range: use nearest value
+            Some(v.to_string().parse().ok()?)
+        }
+        (None, None) => None,
+    }
+}
+
 /// Test result containing forecast, actual value, and MAPE.
 struct TestResult {
     forecast: f64,
@@ -172,23 +205,10 @@ fn run_real_data_test(filename: &str) -> TestResult {
         max_price,
     );
 
-    // Calculate median interval to determine horizon
-    let timestamps: Vec<_> = sampled_train.iter().map(|(ts, _)| *ts).collect();
-    let median_interval = if timestamps.len() >= 2 {
-        let mut intervals: Vec<i64> = timestamps
-            .windows(2)
-            .map(|w| (w[1] - w[0]).num_seconds())
-            .collect();
-        intervals.sort();
-        intervals[intervals.len() / 2]
-    } else {
-        3600 // Default to 1 hour
-    };
-
-    // Run prediction with horizon = 1 step (using the median interval)
+    // Run prediction with horizon = 24 hours to cover the actual data point
     let input = PredictionInput {
         data,
-        horizon: TimeDelta::seconds(median_interval),
+        horizon: TimeDelta::hours(24),
     };
 
     let result = match predict(&input) {
@@ -198,14 +218,9 @@ fn run_real_data_test(filename: &str) -> TestResult {
         }
     };
 
-    let forecast_value: f64 = result
-        .forecast_values
-        .values()
-        .next()
-        .expect("No forecast values")
-        .to_string()
-        .parse()
-        .expect("Failed to parse forecast value");
+    // Get forecast value at the actual data point's timestamp (with interpolation)
+    let forecast_value = get_forecast_at_timestamp(&result.forecast_values, actual_point.0)
+        .expect("Could not get forecast at target timestamp");
 
     let mape = compute_mape(forecast_value, actual_value);
 
