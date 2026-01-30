@@ -11,7 +11,9 @@ use tracing::info;
 /// Algorithm:
 /// 1. Check coefficient of variation (CV) of time deltas.
 /// 2. If CV < 0.1 → already regular, return as-is.
-/// 3. Otherwise, create a uniform grid from start to end with the same
+/// 3. Detect outlier gaps (> 10x median interval). If found, split data at
+///    gaps and normalize each segment independently.
+/// 4. Otherwise, create a uniform grid from start to end with the same
 ///    number of points, and use nearest-neighbor resampling.
 pub fn normalize_time_series_data(
     timestamps: &[NaiveDateTime],
@@ -67,7 +69,91 @@ pub fn normalize_time_series_data(
         return Ok((timestamps.to_vec(), values.to_vec()));
     }
 
+    // Detect outlier gaps: gaps > 10x the median interval
+    let median_interval = median(&time_diffs);
+    let gap_threshold = median_interval * 10.0;
+
+    let outlier_gap_indices: Vec<usize> = time_diffs
+        .iter()
+        .enumerate()
+        .filter(|(_, &diff)| diff > gap_threshold)
+        .map(|(i, _)| i + 1) // index after the gap
+        .collect();
+
+    if !outlier_gap_indices.is_empty() {
+        info!(
+            gaps = outlier_gap_indices.len(),
+            threshold_days = gap_threshold / 86400.0,
+            "Detected outlier gaps, normalizing segments independently"
+        );
+
+        // Split data at gap indices and normalize each segment
+        return normalize_with_gaps(timestamps, values, &outlier_gap_indices);
+    }
+
     info!(cv = cv, "Intervals are irregular, performing normalization");
+
+    normalize_segment(timestamps, values)
+}
+
+/// Normalize data that has been split at outlier gaps.
+/// Each segment is normalized independently and then concatenated.
+fn normalize_with_gaps(
+    timestamps: &[NaiveDateTime],
+    values: &[f64],
+    gap_indices: &[usize],
+) -> Result<(Vec<NaiveDateTime>, Vec<f64>)> {
+    let mut all_timestamps = Vec::new();
+    let mut all_values = Vec::new();
+
+    let mut start = 0;
+    for &gap_idx in gap_indices {
+        if gap_idx > start && gap_idx <= timestamps.len() {
+            let seg_ts = &timestamps[start..gap_idx];
+            let seg_vals = &values[start..gap_idx];
+
+            if seg_ts.len() >= 2 {
+                let (norm_ts, norm_vals) = normalize_segment(seg_ts, seg_vals)?;
+                all_timestamps.extend(norm_ts);
+                all_values.extend(norm_vals);
+            } else {
+                all_timestamps.extend_from_slice(seg_ts);
+                all_values.extend_from_slice(seg_vals);
+            }
+        }
+        start = gap_idx;
+    }
+
+    // Handle the last segment
+    if start < timestamps.len() {
+        let seg_ts = &timestamps[start..];
+        let seg_vals = &values[start..];
+
+        if seg_ts.len() >= 2 {
+            let (norm_ts, norm_vals) = normalize_segment(seg_ts, seg_vals)?;
+            all_timestamps.extend(norm_ts);
+            all_values.extend(norm_vals);
+        } else {
+            all_timestamps.extend_from_slice(seg_ts);
+            all_values.extend_from_slice(seg_vals);
+        }
+    }
+
+    Ok((all_timestamps, all_values))
+}
+
+/// Normalize a single contiguous segment of data.
+fn normalize_segment(
+    timestamps: &[NaiveDateTime],
+    values: &[f64],
+) -> Result<(Vec<NaiveDateTime>, Vec<f64>)> {
+    if timestamps.len() <= 1 {
+        return Ok((timestamps.to_vec(), values.to_vec()));
+    }
+
+    let num_points = timestamps.len();
+    let start_time = *timestamps.iter().min().unwrap();
+    let end_time = *timestamps.iter().max().unwrap();
 
     let total_duration = (end_time - start_time).num_milliseconds() as f64 / 1000.0;
 
@@ -106,7 +192,7 @@ pub fn normalize_time_series_data(
         retention_rate = format!("{:.1}", retention_rate),
         original_range = format!("{:.2}", original_range),
         normalized_range = format!("{:.2}", normalized_range),
-        "Normalization complete"
+        "Segment normalization complete"
     );
 
     Ok((new_timestamps, new_values))
@@ -169,6 +255,20 @@ fn mean(data: &[f64]) -> f64 {
     data.iter().sum::<f64>() / data.len() as f64
 }
 
+fn median(data: &[f64]) -> f64 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = data.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    }
+}
+
 fn std_dev(data: &[f64]) -> f64 {
     if data.len() < 2 {
         return 0.0;
@@ -187,93 +287,4 @@ fn min_f64(data: &[f64]) -> f64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::NaiveDate;
-
-    fn make_ts(hour: u32, min: u32, sec: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2024, 1, 1)
-            .unwrap()
-            .and_hms_opt(hour, min, sec)
-            .unwrap()
-    }
-
-    #[test]
-    fn test_empty_input() {
-        let (ts, vals) = normalize_time_series_data(&[], &[]).unwrap();
-        assert!(ts.is_empty());
-        assert!(vals.is_empty());
-    }
-
-    #[test]
-    fn test_single_point() {
-        let ts = vec![make_ts(10, 0, 0)];
-        let vals = vec![42.0];
-        let (out_ts, out_vals) = normalize_time_series_data(&ts, &vals).unwrap();
-        assert_eq!(out_ts.len(), 1);
-        assert_eq!(out_vals, vec![42.0]);
-    }
-
-    #[test]
-    fn test_regular_intervals_skip_normalization() {
-        // 5 points at exactly 1-hour intervals → CV ≈ 0 → should return as-is
-        let ts: Vec<NaiveDateTime> = (0..5).map(|i| make_ts(10 + i, 0, 0)).collect();
-        let vals: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-
-        let (out_ts, out_vals) = normalize_time_series_data(&ts, &vals).unwrap();
-        assert_eq!(out_ts, ts);
-        assert_eq!(out_vals, vals);
-    }
-
-    #[test]
-    fn test_irregular_intervals_normalized() {
-        // Irregular intervals: 60s, 300s, 60s, 600s → high CV
-        let ts = vec![
-            make_ts(10, 0, 0),
-            make_ts(10, 1, 0),  // +60s
-            make_ts(10, 6, 0),  // +300s
-            make_ts(10, 7, 0),  // +60s
-            make_ts(10, 17, 0), // +600s
-        ];
-        let vals = vec![100.0, 200.0, 150.0, 300.0, 50.0];
-
-        let (out_ts, out_vals) = normalize_time_series_data(&ts, &vals).unwrap();
-        assert_eq!(out_ts.len(), 5);
-        assert_eq!(out_vals.len(), 5);
-        // First timestamp should be preserved
-        assert_eq!(out_ts[0], ts[0]);
-        // Last timestamp should be preserved
-        assert_eq!(out_ts[4], ts[4]);
-        // All original values should appear (nearest-neighbor)
-        for v in &out_vals {
-            assert!(vals.contains(v));
-        }
-    }
-
-    #[test]
-    fn test_mismatched_lengths_error() {
-        let ts = vec![make_ts(10, 0, 0)];
-        let vals = vec![1.0, 2.0];
-        assert!(normalize_time_series_data(&ts, &vals).is_err());
-    }
-
-    #[test]
-    fn test_preserves_value_range() {
-        // The normalization should not introduce values outside original range
-        let ts = vec![
-            make_ts(10, 0, 0),
-            make_ts(10, 0, 30), // +30s
-            make_ts(10, 5, 0),  // +270s  (big gap)
-            make_ts(10, 5, 20), // +20s
-            make_ts(10, 20, 0), // +880s  (big gap)
-        ];
-        let vals = vec![10.0, 50.0, 20.0, 80.0, 30.0];
-
-        let (_, out_vals) = normalize_time_series_data(&ts, &vals).unwrap();
-        let orig_min = min_f64(&vals);
-        let orig_max = max_f64(&vals);
-        for v in &out_vals {
-            assert!(*v >= orig_min && *v <= orig_max);
-        }
-    }
-}
+mod tests;
