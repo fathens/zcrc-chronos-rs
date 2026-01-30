@@ -1,0 +1,10 @@
+[package]
+name = "scaler"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+common = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }

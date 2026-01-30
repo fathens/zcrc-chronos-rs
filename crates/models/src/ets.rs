@@ -42,29 +42,31 @@ impl ForecastModel for EtsModel {
         }
 
         // Seasonal ETS: delegate to Holt-Winters implementation
+        // Falls back to non-seasonal if insufficient data for 2 full cycles
         if let Some(season_len) = self.season_length.filter(|&s| s > 1) {
-            if values.len() < 2 * season_len {
-                return Err(ChronosError::InsufficientData(format!(
-                    "Seasonal ETS requires at least 2 full cycles ({} points), got {}",
-                    2 * season_len,
-                    values.len()
-                )));
-            }
+            if values.len() >= 2 * season_len {
+                debug!(
+                    season_length = season_len,
+                    horizon = horizon,
+                    data_length = values.len(),
+                    "ETS fitting (Holt-Winters seasonal)"
+                );
 
+                let result = hw::hw_fit_predict(values, season_len, horizon)?;
+                return Ok(ForecastOutput {
+                    mean: result.mean,
+                    lower_quantile: Some(result.lower),
+                    upper_quantile: Some(result.upper),
+                    model_name: "ETS".into(),
+                });
+            }
+            // Insufficient data for seasonal model - fall through to non-seasonal
             debug!(
                 season_length = season_len,
-                horizon = horizon,
-                data_length = values.len(),
-                "ETS fitting (Holt-Winters seasonal)"
+                required = 2 * season_len,
+                actual = values.len(),
+                "Insufficient data for seasonal ETS, falling back to non-seasonal"
             );
-
-            let result = hw::hw_fit_predict(values, season_len, horizon)?;
-            return Ok(ForecastOutput {
-                mean: result.mean,
-                lower_quantile: Some(result.lower),
-                upper_quantile: Some(result.upper),
-                model_name: "ETS".into(),
-            });
         }
 
         // Non-seasonal: use augurs AutoETS ("ZZN")
