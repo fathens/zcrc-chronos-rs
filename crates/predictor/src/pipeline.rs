@@ -23,12 +23,12 @@ pub struct PredictionInput {
 /// Full result of a prediction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForecastResult {
-    /// Point forecast values.
-    pub forecast_values: Vec<BigDecimal>,
-    /// Lower confidence bound (10th percentile).
-    pub lower_bound: Option<Vec<BigDecimal>>,
-    /// Upper confidence bound (90th percentile).
-    pub upper_bound: Option<Vec<BigDecimal>>,
+    /// Point forecast values with timestamps.
+    pub forecast_values: BTreeMap<NaiveDateTime, BigDecimal>,
+    /// Lower confidence bound (10th percentile) with timestamps.
+    pub lower_bound: Option<BTreeMap<NaiveDateTime, BigDecimal>>,
+    /// Upper confidence bound (90th percentile) with timestamps.
+    pub upper_bound: Option<BTreeMap<NaiveDateTime, BigDecimal>>,
     /// Name of model(s) used.
     pub model_name: String,
     /// Strategy selected.
@@ -39,23 +39,56 @@ pub struct ForecastResult {
     pub model_count: usize,
 }
 
+/// Calculate median sampling interval in seconds.
+fn calculate_median_interval(timestamps: &[NaiveDateTime]) -> i64 {
+    if timestamps.len() < 2 {
+        return 1;
+    }
+
+    let mut intervals: Vec<i64> = timestamps
+        .windows(2)
+        .map(|w| (w[1] - w[0]).num_seconds())
+        .collect();
+    intervals.sort();
+    intervals[intervals.len() / 2].max(1)
+}
+
 /// Convert TimeDelta to steps based on median sampling interval.
 fn horizon_to_steps(horizon: &TimeDelta, timestamps: &[NaiveDateTime]) -> usize {
     if timestamps.len() < 2 {
         return 1;
     }
 
-    // Calculate median sampling interval
-    let mut intervals: Vec<i64> = timestamps
-        .windows(2)
-        .map(|w| (w[1] - w[0]).num_seconds())
-        .collect();
-    intervals.sort();
-    let median_interval = intervals[intervals.len() / 2];
+    let median_interval = calculate_median_interval(timestamps);
 
     // Convert horizon to steps (minimum 1)
-    let steps = (horizon.num_seconds() / median_interval.max(1)) as usize;
+    let steps = (horizon.num_seconds() / median_interval) as usize;
     steps.max(1)
+}
+
+/// Convert TimeDelta to steps and generate forecast timestamps.
+///
+/// Returns (steps, forecast_timestamps) where:
+/// - steps: number of forecast steps
+/// - forecast_timestamps: timestamps for each forecast point
+fn horizon_to_steps_with_timestamps(
+    horizon: &TimeDelta,
+    timestamps: &[NaiveDateTime],
+) -> (usize, Vec<NaiveDateTime>) {
+    let steps = horizon_to_steps(horizon, timestamps);
+
+    if timestamps.is_empty() {
+        return (steps, Vec::new());
+    }
+
+    let last_ts = *timestamps.last().unwrap();
+    let median_interval = calculate_median_interval(timestamps);
+
+    let forecast_timestamps: Vec<NaiveDateTime> = (1..=steps)
+        .map(|i| last_ts + TimeDelta::seconds(median_interval * i as i64))
+        .collect();
+
+    (steps, forecast_timestamps)
 }
 
 /// Calculate time budget based on data size.
@@ -130,8 +163,9 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
         time_budget as u64,
     );
 
-    // Convert horizon from TimeDelta to steps
-    let horizon_steps = horizon_to_steps(&input.horizon, &norm_timestamps);
+    // Convert horizon from TimeDelta to steps with timestamps
+    let (horizon_steps, forecast_timestamps) =
+        horizon_to_steps_with_timestamps(&input.horizon, &norm_timestamps);
 
     // Step 4: Hierarchical training + ensemble (with detected season period)
     let mut trainer = HierarchicalTrainer::default();
@@ -145,13 +179,13 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
     )?;
 
     // Step 5: Inverse transform if log was applied
-    let final_mean = if log_transformed {
+    let final_mean: Vec<f64> = if log_transformed {
         forecast.mean.iter().map(|v| v.exp()).collect()
     } else {
         forecast.mean
     };
 
-    let final_lower = if log_transformed {
+    let final_lower: Option<Vec<f64>> = if log_transformed {
         forecast
             .lower_quantile
             .map(|v| v.iter().map(|x| x.exp()).collect())
@@ -159,7 +193,7 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
         forecast.lower_quantile
     };
 
-    let final_upper = if log_transformed {
+    let final_upper: Option<Vec<f64>> = if log_transformed {
         forecast
             .upper_quantile
             .map(|v| v.iter().map(|x| x.exp()).collect())
@@ -177,11 +211,42 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
         "Prediction pipeline complete"
     );
 
-    // Convert f64 → Decimal at the boundary
+    // Convert f64 → Decimal and build BTreeMap with timestamps
+    let forecast_decimals = f64s_to_decimals(&final_mean)?;
+    let forecast_values: BTreeMap<NaiveDateTime, BigDecimal> = forecast_timestamps
+        .iter()
+        .zip(forecast_decimals)
+        .map(|(ts, val)| (*ts, val))
+        .collect();
+
+    let lower_bound = final_lower
+        .map(|v| {
+            f64s_to_decimals(&v).map(|decimals| {
+                forecast_timestamps
+                    .iter()
+                    .zip(decimals.into_iter())
+                    .map(|(ts, val)| (*ts, val))
+                    .collect()
+            })
+        })
+        .transpose()?;
+
+    let upper_bound = final_upper
+        .map(|v| {
+            f64s_to_decimals(&v).map(|decimals| {
+                forecast_timestamps
+                    .iter()
+                    .zip(decimals.into_iter())
+                    .map(|(ts, val)| (*ts, val))
+                    .collect()
+            })
+        })
+        .transpose()?;
+
     Ok(ForecastResult {
-        forecast_values: f64s_to_decimals(&final_mean)?,
-        lower_bound: final_lower.map(|v| f64s_to_decimals(&v)).transpose()?,
-        upper_bound: final_upper.map(|v| f64s_to_decimals(&v)).transpose()?,
+        forecast_values,
+        lower_bound,
+        upper_bound,
         model_name: forecast.model_name,
         strategy_name: strategy.strategy_name,
         processing_time_secs: processing_time,
