@@ -96,15 +96,12 @@ struct TestResult {
 /// Run a real data test for the given file.
 ///
 /// Strategy:
-/// 1. Load the data (31 days of price data)
-/// 2. Use the first 30 days as training data (downsampled to ~720 points)
-/// 3. Find the data point closest to 24 hours after training end
-/// 4. Run prediction with horizon=1
-/// 5. Compare forecast vs actual
+/// 1. Load all data
+/// 2. Use all data except the last 24 hours for training
+/// 3. Predict 24 hours ahead
+/// 4. Compare forecast vs the last data point
 ///
 /// Note: Data is downsampled to ~720 points for faster test execution.
-/// The normalize module now handles large time gaps correctly, so full data
-/// can be used if needed.
 fn run_real_data_test(filename: &str) -> TestResult {
     let file_data = load_real_data(filename);
 
@@ -128,34 +125,22 @@ fn run_real_data_test(filename: &str) -> TestResult {
         parsed.len()
     );
 
-    // Find the cutoff: 30 days from the start
-    let start_time = parsed[0].0;
-    let cutoff_time = start_time + chrono::Duration::days(30);
-
-    // Split data: training (first 30 days) and find actual value (~24h after cutoff)
-    type DataRef<'a> = Vec<&'a (NaiveDateTime, f64)>;
-    let (train_data, future_data): (DataRef<'_>, DataRef<'_>) =
-        parsed.iter().partition(|(ts, _)| *ts < cutoff_time);
-
-    assert!(
-        !train_data.is_empty(),
-        "No training data before cutoff time"
-    );
-    assert!(
-        !future_data.is_empty(),
-        "No future data after cutoff time for validation"
-    );
-
-    // Find the data point closest to 24 hours after the last training point
-    let last_train_time = train_data.last().unwrap().0;
-    let target_time = last_train_time + chrono::Duration::hours(24);
-
-    let actual_point = future_data
-        .iter()
-        .min_by_key(|(ts, _)| (*ts - target_time).num_seconds().abs())
-        .expect("No future data point found");
-
+    // Use the last data point as actual value
+    let actual_point = parsed.last().unwrap();
     let actual_value = actual_point.1;
+
+    // Cutoff: 24 hours before the last data point
+    let cutoff_time = actual_point.0 - chrono::Duration::hours(24);
+
+    // Split data: training (before cutoff)
+    let train_data: Vec<&(NaiveDateTime, f64)> =
+        parsed.iter().filter(|(ts, _)| *ts < cutoff_time).collect();
+
+    assert!(
+        train_data.len() >= 50,
+        "Need at least 50 training data points, got {}",
+        train_data.len()
+    );
 
     // Downsample if too many data points (keep ~720 points = 30 days * 24 hours)
     // This is required because the prediction pipeline fails with 2000+ points
