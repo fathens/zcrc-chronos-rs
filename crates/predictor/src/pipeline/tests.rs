@@ -134,11 +134,20 @@ fn test_horizon_to_steps() {
     let single_ts = vec![base];
     assert_eq!(horizon_to_steps(&TimeDelta::hours(24), &single_ts), 1);
 
-    // Non-exact multiple: 2.5 hours on hourly data → 2 steps (truncated)
-    assert_eq!(horizon_to_steps(&TimeDelta::minutes(150), &hourly_ts), 2);
+    // Non-exact multiple: 2.5 hours on hourly data → 3 steps (ceiling)
+    assert_eq!(horizon_to_steps(&TimeDelta::minutes(150), &hourly_ts), 3);
 
     // Horizon smaller than interval → minimum 1 step
     assert_eq!(horizon_to_steps(&TimeDelta::minutes(30), &hourly_ts), 1);
+
+    // Ceiling behavior: just over 1 interval → 2 steps
+    assert_eq!(horizon_to_steps(&TimeDelta::minutes(61), &hourly_ts), 2);
+
+    // Ceiling behavior: just under 1 interval → still 1 step
+    assert_eq!(horizon_to_steps(&TimeDelta::minutes(59), &hourly_ts), 1);
+
+    // Ceiling behavior: 25 hours on daily data → 2 steps
+    assert_eq!(horizon_to_steps(&TimeDelta::hours(25), &daily_ts), 2);
 
     // Minutely data: 1 hour → 60 steps
     let minutely_ts: Vec<_> = (0..200).map(|i| base + TimeDelta::minutes(i)).collect();
@@ -192,7 +201,7 @@ fn test_predict_non_exact_horizon() {
         })
         .collect();
 
-    // 2.5 hours on hourly data → 2 steps
+    // 2.5 hours on hourly data → 3 steps (ceiling)
     let input = PredictionInput {
         data: hourly_data,
         horizon: TimeDelta::minutes(150),
@@ -201,8 +210,8 @@ fn test_predict_non_exact_horizon() {
     let result = predict(&input).unwrap();
     assert_eq!(
         result.forecast_values.len(),
-        2,
-        "2.5 hours on hourly data should produce 2 forecasts (truncated)"
+        3,
+        "2.5 hours on hourly data should produce 3 forecasts (ceiling)"
     );
 }
 

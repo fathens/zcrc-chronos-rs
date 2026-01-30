@@ -61,8 +61,9 @@ fn horizon_to_steps(horizon: &TimeDelta, timestamps: &[NaiveDateTime]) -> usize 
 
     let median_interval = calculate_median_interval(timestamps);
 
-    // Convert horizon to steps (minimum 1)
-    let steps = (horizon.num_seconds() / median_interval) as usize;
+    // Convert horizon to steps (ceiling division, minimum 1)
+    let horizon_secs = horizon.num_seconds();
+    let steps = ((horizon_secs + median_interval - 1) / median_interval) as usize;
     steps.max(1)
 }
 
