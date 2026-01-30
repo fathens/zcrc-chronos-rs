@@ -84,6 +84,25 @@ fn compute_mape(forecast: f64, actual: f64) -> f64 {
     ((forecast - actual) / actual).abs() * 100.0
 }
 
+/// Compute MASE (Mean Absolute Scaled Error).
+/// MASE < 1.0 means the forecast is better than naive prediction (using last training value).
+fn compute_mase(forecast: f64, actual: f64, last_train: f64) -> f64 {
+    let mae = (forecast - actual).abs();
+    let naive_mae = (last_train - actual).abs();
+    if naive_mae < 1e-15 {
+        return f64::INFINITY;
+    }
+    mae / naive_mae
+}
+
+/// Check if the forecast direction matches the actual direction.
+/// Direction is relative to the last training value.
+fn check_direction(forecast: f64, actual: f64, last_train: f64) -> bool {
+    let forecast_direction = forecast - last_train;
+    let actual_direction = actual - last_train;
+    forecast_direction.signum() == actual_direction.signum()
+}
+
 /// Get forecast value at target timestamp, with linear interpolation if needed.
 fn get_forecast_at_timestamp(
     forecast_values: &BTreeMap<NaiveDateTime, BigDecimal>,
@@ -117,12 +136,18 @@ fn get_forecast_at_timestamp(
     }
 }
 
-/// Test result containing forecast, actual value, and MAPE.
+/// Test result containing forecast, actual value, and accuracy metrics.
 struct TestResult {
     forecast: f64,
     actual: f64,
+    #[allow(dead_code)]
+    last_train: f64,
     mape: f64,
+    mase: f64,
+    direction_correct: bool,
+    #[allow(dead_code)]
     description: String,
+    #[allow(dead_code)]
     data_points_used: usize,
 }
 
@@ -187,6 +212,9 @@ fn run_real_data_test(filename: &str) -> TestResult {
     let sampled_train: Vec<&(NaiveDateTime, f64)> =
         train_data.iter().step_by(step).cloned().collect();
 
+    // Get the last training value (for MASE and direction calculations)
+    let last_train_value = sampled_train.last().unwrap().1;
+
     // Prepare training data as BTreeMap
     let data: BTreeMap<NaiveDateTime, BigDecimal> = sampled_train
         .iter()
@@ -223,11 +251,16 @@ fn run_real_data_test(filename: &str) -> TestResult {
         .expect("Could not get forecast at target timestamp");
 
     let mape = compute_mape(forecast_value, actual_value);
+    let mase = compute_mase(forecast_value, actual_value, last_train_value);
+    let direction_correct = check_direction(forecast_value, actual_value, last_train_value);
 
     TestResult {
         forecast: forecast_value,
         actual: actual_value,
+        last_train: last_train_value,
         mape,
+        mase,
+        direction_correct,
         description: file_data.description,
         data_points_used: train_data.len(),
     }
@@ -235,124 +268,258 @@ fn run_real_data_test(filename: &str) -> TestResult {
 
 /// Macro to generate individual test functions for each pattern.
 /// Tests all files matching the pattern (e.g., "uptrend" tests uptrend-01.json, uptrend-02.json, ...).
+///
+/// Parameters:
+/// - $name: Test function name
+/// - $pattern: Pattern name (e.g., "uptrend")
+/// - $mape_threshold: Maximum allowed MAPE percentage
+/// - $mase_threshold: Maximum allowed MASE (inf values always pass)
+/// - $min_dir_correct: Minimum number of files that must have correct direction
 macro_rules! real_data_test {
-    ($name:ident, $pattern:expr, $threshold:expr) => {
+    ($name:ident, $pattern:expr, $mape_threshold:expr, $mase_threshold:expr, $min_dir_correct:expr) => {
         #[test]
         #[ignore]
         fn $name() {
             let files = find_pattern_files($pattern);
             let mut all_passed = true;
+            let mut direction_correct_count = 0usize;
+            let mut failure_reasons: Vec<String> = Vec::new();
 
             println!();
             println!("Pattern: {} ({} files)", $pattern, files.len());
-            println!("{}", "-".repeat(60));
+            println!("{}", "-".repeat(90));
+            println!(
+                "{:<20} {:>8} {:>8} {:>5} {:>12} {:>12} {:>8}",
+                "File", "MAPE%", "MASE", "Dir", "MAPE Thr", "MASE Thr", "Status"
+            );
+            println!("{}", "-".repeat(90));
 
             for file in &files {
                 let result = run_real_data_test(file);
-                let passed = result.mape < $threshold;
+                let mape_ok = result.mape < $mape_threshold;
+                let mase_ok = !result.mase.is_finite() || result.mase < $mase_threshold;
+                let passed = mape_ok && mase_ok;
                 let status = if passed { "PASS" } else { "FAIL" };
+                let dir_symbol = if result.direction_correct { "Y" } else { "N" };
 
-                println!("  {} ({})", file, result.description);
+                if result.direction_correct {
+                    direction_correct_count += 1;
+                }
+
+                let name = file.trim_end_matches(".json");
+                let mase_str = if result.mase.is_finite() {
+                    format!("{:.2}", result.mase)
+                } else {
+                    "-".to_string()
+                };
                 println!(
-                    "    {} points, MAPE={:.2}% (threshold={:.0}%) [{}]",
-                    result.data_points_used, result.mape, $threshold, status
+                    "{:<20} {:>8.2} {:>8} {:>5} {:>12.0}% {:>12.1} {:>8}",
+                    name,
+                    result.mape,
+                    mase_str,
+                    dir_symbol,
+                    $mape_threshold,
+                    $mase_threshold,
+                    status
                 );
 
                 if !passed {
                     all_passed = false;
+                    if !mape_ok {
+                        failure_reasons.push(format!(
+                            "{}: MAPE {:.2}% > {:.0}%",
+                            name, result.mape, $mape_threshold
+                        ));
+                    }
+                    if !mase_ok {
+                        failure_reasons.push(format!(
+                            "{}: MASE {:.2} > {:.1}",
+                            name, result.mase, $mase_threshold
+                        ));
+                    }
                 }
+            }
+
+            // Check direction accuracy threshold
+            #[allow(unused_comparisons)]
+            let dir_ok = direction_correct_count >= $min_dir_correct;
+            println!();
+            println!(
+                "Direction: {}/{} correct (minimum: {})",
+                direction_correct_count,
+                files.len(),
+                $min_dir_correct
+            );
+
+            if !dir_ok {
+                failure_reasons.push(format!(
+                    "Direction accuracy: {}/{} < {} required",
+                    direction_correct_count,
+                    files.len(),
+                    $min_dir_correct
+                ));
             }
 
             println!();
             assert!(
-                all_passed,
-                "One or more files in pattern '{}' exceeded MAPE threshold {:.0}%",
-                $pattern, $threshold
+                all_passed && dir_ok,
+                "Pattern '{}' failed:\n  {}",
+                $pattern,
+                failure_reasons.join("\n  ")
             );
         }
     };
 }
 
 // Generate tests for each pattern with appropriate thresholds
-// Thresholds set to ~2.5x current MAPE, rounded to nearest 5%
+// Parameters: (name, pattern, mape_threshold, mase_threshold, min_direction_correct)
 // Each pattern may have multiple data files (-01, -02, etc.)
-real_data_test!(test_uptrend_accuracy, "uptrend", 5.0);
-real_data_test!(test_downtrend_accuracy, "downtrend", 15.0);
-real_data_test!(test_low_volatility_accuracy, "low_volatility", 10.0);
-real_data_test!(test_range_accuracy, "range", 5.0);
-real_data_test!(test_gradual_change_accuracy, "gradual_change", 25.0);
-real_data_test!(test_double_bottom_accuracy, "double_bottom", 5.0);
-real_data_test!(test_high_volatility_accuracy, "high_volatility", 30.0);
-real_data_test!(test_spike_up_accuracy, "spike_up", 5.0);
-real_data_test!(test_spike_down_accuracy, "spike_down", 15.0);
-real_data_test!(test_v_recovery_accuracy, "v_recovery", 30.0);
+//
+// Thresholds:
+// - MAPE: Maximum allowed percentage error
+// - MASE: Maximum allowed scaled error (inf values always pass)
+// - Direction: Minimum number of files with correct direction prediction
+real_data_test!(test_uptrend_accuracy, "uptrend", 5.0, 2.0, 3);
+real_data_test!(test_downtrend_accuracy, "downtrend", 15.0, 2.0, 3);
+real_data_test!(test_low_volatility_accuracy, "low_volatility", 10.0, 2.0, 4);
+real_data_test!(test_range_accuracy, "range", 5.0, 2.0, 2);
+real_data_test!(test_gradual_change_accuracy, "gradual_change", 25.0, 2.0, 2);
+real_data_test!(test_double_bottom_accuracy, "double_bottom", 5.0, 2.0, 2);
+real_data_test!(
+    test_high_volatility_accuracy,
+    "high_volatility",
+    30.0,
+    15.0,
+    0
+);
+real_data_test!(test_spike_up_accuracy, "spike_up", 5.0, 2.0, 4);
+real_data_test!(test_spike_down_accuracy, "spike_down", 15.0, 2.0, 4);
+real_data_test!(test_v_recovery_accuracy, "v_recovery", 30.0, 2.0, 3);
 
 /// Run all patterns and produce a summary report.
 #[test]
 #[ignore]
 fn test_all_patterns_summary() {
-    let patterns = [
-        ("uptrend", 5.0),
-        ("downtrend", 15.0),
-        ("low_volatility", 10.0),
-        ("range", 5.0),
-        ("gradual_change", 25.0),
-        ("double_bottom", 5.0),
-        ("high_volatility", 30.0),
-        ("spike_up", 5.0),
-        ("spike_down", 15.0),
-        ("v_recovery", 30.0),
+    // (pattern, mape_threshold, mase_threshold, min_direction_correct)
+    let patterns: [(&str, f64, f64, usize); 10] = [
+        ("uptrend", 5.0, 2.0, 3),
+        ("downtrend", 15.0, 2.0, 3),
+        ("low_volatility", 10.0, 2.0, 4),
+        ("range", 5.0, 2.0, 2),
+        ("gradual_change", 25.0, 2.0, 2),
+        ("double_bottom", 5.0, 2.0, 2),
+        ("high_volatility", 30.0, 15.0, 0),
+        ("spike_up", 5.0, 2.0, 4),
+        ("spike_down", 15.0, 2.0, 4),
+        ("v_recovery", 30.0, 2.0, 3),
     ];
 
     println!();
     println!("=== Real Data Prediction Accuracy Summary ===");
     println!();
     println!(
-        "{:<25} {:>12} {:>12} {:>10} {:>10} {:>8}",
-        "File", "Forecast", "Actual", "MAPE%", "Threshold", "Status"
+        "{:<20} {:>12} {:>12} {:>8} {:>8} {:>5} {:>8} {:>8} {:>8}",
+        "File", "Forecast", "Actual", "MAPE%", "MASE", "Dir", "MAPE Th", "MASE Th", "Status"
     );
-    println!("{}", "-".repeat(85));
+    println!("{}", "-".repeat(105));
 
     let mut passed = 0;
     let mut failed = 0;
     let mut total_mape = 0.0;
+    let mut total_mase = 0.0;
+    let mut finite_mase_count = 0;
+    let mut total_direction_correct = 0;
     let mut total_files = 0;
+    let mut pattern_failures: Vec<String> = Vec::new();
 
-    for (pattern, threshold) in &patterns {
+    for (pattern, mape_threshold, mase_threshold, min_dir_correct) in &patterns {
         let files = find_pattern_files(pattern);
+        let mut pattern_dir_correct = 0usize;
 
         for file in &files {
             let result = run_real_data_test(file);
-            let status = if result.mape < *threshold {
+            let mape_ok = result.mape < *mape_threshold;
+            let mase_ok = !result.mase.is_finite() || result.mase < *mase_threshold;
+            let file_passed = mape_ok && mase_ok;
+
+            if file_passed {
                 passed += 1;
-                "PASS"
             } else {
                 failed += 1;
-                "FAIL"
-            };
+            }
             total_mape += result.mape;
+            if result.mase.is_finite() {
+                total_mase += result.mase;
+                finite_mase_count += 1;
+            }
+            if result.direction_correct {
+                total_direction_correct += 1;
+                pattern_dir_correct += 1;
+            }
             total_files += 1;
 
             let name = file.trim_end_matches(".json");
+            let dir_symbol = if result.direction_correct { "Y" } else { "N" };
+            let mase_str = if result.mase.is_finite() {
+                format!("{:.2}", result.mase)
+            } else {
+                "-".to_string()
+            };
+            let status = if file_passed { "PASS" } else { "FAIL" };
             println!(
-                "{:<25} {:>12.4e} {:>12.4e} {:>10.2} {:>10.0} {:>8}",
-                name, result.forecast, result.actual, result.mape, threshold, status
+                "{:<20} {:>12.4e} {:>12.4e} {:>8.2} {:>8} {:>5} {:>8.0}% {:>8.1} {:>8}",
+                name,
+                result.forecast,
+                result.actual,
+                result.mape,
+                mase_str,
+                dir_symbol,
+                mape_threshold,
+                mase_threshold,
+                status
             );
+        }
+
+        // Check direction threshold for this pattern
+        if pattern_dir_correct < *min_dir_correct {
+            pattern_failures.push(format!(
+                "{}: Direction {}/{} < {} required",
+                pattern,
+                pattern_dir_correct,
+                files.len(),
+                min_dir_correct
+            ));
         }
     }
 
-    println!("{}", "-".repeat(85));
+    println!("{}", "-".repeat(105));
+    let direction_accuracy = total_direction_correct as f64 / total_files as f64 * 100.0;
+    let avg_mase = if finite_mase_count > 0 {
+        total_mase / finite_mase_count as f64
+    } else {
+        0.0
+    };
     println!(
-        "Total: {} passed, {} failed, Average MAPE: {:.2}%",
+        "Total: {} passed, {} failed | Avg MAPE: {:.2}% | Avg MASE: {:.2} | Direction: {:.0}% ({}/{})",
         passed,
         failed,
-        total_mape / total_files as f64
+        total_mape / total_files as f64,
+        avg_mase,
+        direction_accuracy,
+        total_direction_correct,
+        total_files
     );
     println!();
 
-    assert_eq!(
-        failed, 0,
-        "{} out of {} files failed their MAPE thresholds",
-        failed, total_files
+    let all_passed = failed == 0 && pattern_failures.is_empty();
+    assert!(
+        all_passed,
+        "Test failures:\n  - {} file(s) failed MAPE/MASE thresholds\n  - {}",
+        failed,
+        if pattern_failures.is_empty() {
+            "All direction thresholds met".to_string()
+        } else {
+            pattern_failures.join("\n  - ")
+        }
     );
 }
