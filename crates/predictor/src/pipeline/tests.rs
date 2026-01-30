@@ -127,6 +127,77 @@ fn test_horizon_to_steps() {
     // Edge case: fewer than 2 timestamps → return 1
     let single_ts = vec![base];
     assert_eq!(horizon_to_steps(&TimeDelta::hours(24), &single_ts), 1);
+
+    // Non-exact multiple: 2.5 hours on hourly data → 2 steps (truncated)
+    assert_eq!(horizon_to_steps(&TimeDelta::minutes(150), &hourly_ts), 2);
+
+    // Horizon smaller than interval → minimum 1 step
+    assert_eq!(horizon_to_steps(&TimeDelta::minutes(30), &hourly_ts), 1);
+
+    // Minutely data: 1 hour → 60 steps
+    let minutely_ts: Vec<_> = (0..200).map(|i| base + TimeDelta::minutes(i)).collect();
+    assert_eq!(horizon_to_steps(&TimeDelta::hours(1), &minutely_ts), 60);
+}
+
+#[test]
+fn test_predict_horizon_steps_match() {
+    // Verify that forecast length matches expected steps for various intervals
+
+    // Daily data with 1 week horizon
+    let base = NaiveDate::from_ymd_opt(2024, 1, 1)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+
+    let daily_data: BTreeMap<NaiveDateTime, BigDecimal> = (0..60)
+        .map(|i| {
+            let ts = base + TimeDelta::days(i);
+            let val = BigDecimal::from_f64(100.0 + i as f64).unwrap();
+            (ts, val)
+        })
+        .collect();
+
+    let input = PredictionInput {
+        data: daily_data,
+        horizon: TimeDelta::days(7), // 7 days → 7 steps
+    };
+
+    let result = predict(&input).unwrap();
+    assert_eq!(
+        result.forecast_values.len(),
+        7,
+        "Daily data with 7-day horizon should produce 7 forecasts"
+    );
+}
+
+#[test]
+fn test_predict_non_exact_horizon() {
+    // When horizon is not exact multiple of interval, should truncate
+    let base = NaiveDate::from_ymd_opt(2024, 1, 1)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+
+    let hourly_data: BTreeMap<NaiveDateTime, BigDecimal> = (0..100)
+        .map(|i| {
+            let ts = base + TimeDelta::hours(i);
+            let val = BigDecimal::from_f64(100.0 + i as f64).unwrap();
+            (ts, val)
+        })
+        .collect();
+
+    // 2.5 hours on hourly data → 2 steps
+    let input = PredictionInput {
+        data: hourly_data,
+        horizon: TimeDelta::minutes(150),
+    };
+
+    let result = predict(&input).unwrap();
+    assert_eq!(
+        result.forecast_values.len(),
+        2,
+        "2.5 hours on hourly data should produce 2 forecasts (truncated)"
+    );
 }
 
 #[test]
