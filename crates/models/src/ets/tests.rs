@@ -120,13 +120,19 @@ fn test_ets_seasonal_with_trend() {
 }
 
 #[test]
-fn test_ets_seasonal_insufficient_cycles() {
+fn test_ets_seasonal_insufficient_cycles_falls_back_to_nonseasonal() {
     let m = 12;
     let values = vec![1.0; 20]; // Less than 2*12=24
     let ts = make_timestamps(20);
     let mut model = EtsModel::new(Some(m));
+    // Should fall back to non-seasonal model instead of failing
     let result = model.fit_predict(&values, &ts, 5);
-    assert!(result.is_err());
+    assert!(
+        result.is_ok(),
+        "Expected fallback to non-seasonal, got error"
+    );
+    let output = result.unwrap();
+    assert_eq!(output.mean.len(), 5);
 }
 
 // -----------------------------------------------------------------------
