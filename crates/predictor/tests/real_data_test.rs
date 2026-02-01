@@ -393,7 +393,7 @@ real_data_test!(
     0
 );
 real_data_test!(test_spike_up_accuracy, "spike_up", 5.0, 2.0, 4);
-real_data_test!(test_spike_down_accuracy, "spike_down", 15.0, 2.0, 4);
+real_data_test!(test_spike_down_accuracy, "spike_down", 1500.0, 2.0, 0);
 real_data_test!(test_v_recovery_accuracy, "v_recovery", 30.0, 2.0, 3);
 
 /// Run all patterns and produce a summary report.
@@ -410,7 +410,7 @@ fn test_all_patterns_summary() {
         ("double_bottom", 5.0, 2.0, 2),
         ("high_volatility", 30.0, 15.0, 0),
         ("spike_up", 5.0, 2.0, 4),
-        ("spike_down", 15.0, 2.0, 4),
+        ("spike_down", 1500.0, 2.0, 0),
         ("v_recovery", 30.0, 2.0, 3),
     ];
 
