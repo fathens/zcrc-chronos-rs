@@ -68,9 +68,48 @@ fn find_pattern_files(pattern: &str) -> Vec<String> {
     files
 }
 
+/// Find all data files for a pattern in the .tmp subdirectory.
+fn find_tmp_pattern_files(pattern: &str) -> Vec<String> {
+    let dir = real_data_dir().join(".tmp");
+    let prefix = format!("{}-", pattern);
+
+    let mut files: Vec<String> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("Failed to read directory {}: {}", dir.display(), e))
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix) && name.ends_with(".json") {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    files.sort(); // Ensure consistent ordering: -01, -02, -03, ...
+    assert!(
+        !files.is_empty(),
+        "No data files found for pattern '{}' in .tmp (expected {}-*.json)",
+        pattern,
+        pattern
+    );
+    files
+}
+
 /// Load and parse a real data JSON file.
 fn load_real_data(filename: &str) -> RealDataFile {
     let path = real_data_dir().join(filename);
+    let content = fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!("Failed to read {}: {}", path.display(), e);
+    });
+    serde_json::from_str(&content).unwrap_or_else(|e| {
+        panic!("Failed to parse {}: {}", path.display(), e);
+    })
+}
+
+/// Load and parse a real data JSON file from the .tmp subdirectory.
+fn load_tmp_real_data(filename: &str) -> RealDataFile {
+    let path = real_data_dir().join(".tmp").join(filename);
     let content = fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!("Failed to read {}: {}", path.display(), e);
     });
@@ -161,8 +200,16 @@ struct TestResult {
 ///
 /// Note: Data is downsampled to ~720 points for faster test execution.
 fn run_real_data_test(filename: &str) -> TestResult {
-    let file_data = load_real_data(filename);
+    run_test_with_data(load_real_data(filename))
+}
 
+/// Run a real data test for a file in the .tmp subdirectory.
+fn run_tmp_data_test(filename: &str) -> TestResult {
+    run_test_with_data(load_tmp_real_data(filename))
+}
+
+/// Run the test with provided data.
+fn run_test_with_data(file_data: RealDataFile) -> TestResult {
     // Parse all timestamps and prices
     let parsed: Vec<(NaiveDateTime, f64)> = file_data
         .data
@@ -371,6 +418,103 @@ macro_rules! real_data_test {
     };
 }
 
+/// Macro to generate test functions for patterns in the .tmp subdirectory.
+macro_rules! real_data_tmp_test {
+    ($name:ident, $pattern:expr, $mape_threshold:expr, $mase_threshold:expr, $min_dir_correct:expr) => {
+        #[test]
+        #[ignore]
+        fn $name() {
+            let files = find_tmp_pattern_files($pattern);
+            let mut all_passed = true;
+            let mut direction_correct_count = 0usize;
+            let mut failure_reasons: Vec<String> = Vec::new();
+
+            println!();
+            println!("Pattern: {} (.tmp) ({} files)", $pattern, files.len());
+            println!("{}", "-".repeat(90));
+            println!(
+                "{:<20} {:>8} {:>8} {:>5} {:>12} {:>12} {:>8}",
+                "File", "MAPE%", "MASE", "Dir", "MAPE Thr", "MASE Thr", "Status"
+            );
+            println!("{}", "-".repeat(90));
+
+            for file in &files {
+                let result = run_tmp_data_test(file);
+                let mape_ok = result.mape < $mape_threshold;
+                let mase_ok = !result.mase.is_finite() || result.mase < $mase_threshold;
+                let passed = mape_ok && mase_ok;
+                let status = if passed { "PASS" } else { "FAIL" };
+                let dir_symbol = if result.direction_correct { "Y" } else { "N" };
+
+                if result.direction_correct {
+                    direction_correct_count += 1;
+                }
+
+                let name = file.trim_end_matches(".json");
+                let mase_str = if result.mase.is_finite() {
+                    format!("{:.2}", result.mase)
+                } else {
+                    "-".to_string()
+                };
+                println!(
+                    "{:<20} {:>8.2} {:>8} {:>5} {:>12.0}% {:>12.1} {:>8}",
+                    name,
+                    result.mape,
+                    mase_str,
+                    dir_symbol,
+                    $mape_threshold,
+                    $mase_threshold,
+                    status
+                );
+
+                if !passed {
+                    all_passed = false;
+                    if !mape_ok {
+                        failure_reasons.push(format!(
+                            "{}: MAPE {:.2}% > {:.0}%",
+                            name, result.mape, $mape_threshold
+                        ));
+                    }
+                    if !mase_ok {
+                        failure_reasons.push(format!(
+                            "{}: MASE {:.2} > {:.1}",
+                            name, result.mase, $mase_threshold
+                        ));
+                    }
+                }
+            }
+
+            // Check direction accuracy threshold
+            #[allow(unused_comparisons)]
+            let dir_ok = direction_correct_count >= $min_dir_correct;
+            println!();
+            println!(
+                "Direction: {}/{} correct (minimum: {})",
+                direction_correct_count,
+                files.len(),
+                $min_dir_correct
+            );
+
+            if !dir_ok {
+                failure_reasons.push(format!(
+                    "Direction accuracy: {}/{} < {} required",
+                    direction_correct_count,
+                    files.len(),
+                    $min_dir_correct
+                ));
+            }
+
+            println!();
+            assert!(
+                all_passed && dir_ok,
+                "Pattern '{}' failed:\n  {}",
+                $pattern,
+                failure_reasons.join("\n  ")
+            );
+        }
+    };
+}
+
 // Generate tests for each pattern with appropriate thresholds
 // Parameters: (name, pattern, mape_threshold, mase_threshold, min_direction_correct)
 // Each pattern may have multiple data files (-01, -02, etc.)
@@ -395,6 +539,10 @@ real_data_test!(
 real_data_test!(test_spike_up_accuracy, "spike_up", 5.0, 2.0, 4);
 real_data_test!(test_spike_down_accuracy, "spike_down", 1500.0, 2.0, 0);
 real_data_test!(test_v_recovery_accuracy, "v_recovery", 30.0, 2.0, 3);
+
+// Tests for .tmp directory (temporary/experimental data)
+// Random data has no predictable pattern, but stable data should still have reasonable accuracy
+real_data_tmp_test!(test_random_accuracy, "random", 25.0, 2.0, 0);
 
 /// Run all patterns and produce a summary report.
 #[test]
