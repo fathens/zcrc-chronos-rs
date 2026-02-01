@@ -227,7 +227,7 @@ def detect_pattern(metrics: dict, prices: np.ndarray,
         return ("spike_up", min(0.9, max_z / 5))
 
     # spike_down: 急落
-    if min_z < -3 and price_change < -30:
+    if min_z < -2.0 and price_change < -20:
         return ("spike_down", min(0.9, abs(min_z) / 5))
 
     # v_recovery: V字回復
@@ -273,10 +273,19 @@ def detect_pattern(metrics: dict, prices: np.ndarray,
     return None
 
 
-def get_existing_files(output_dir: Path) -> dict[str, list[tuple[str, str, str]]]:
+@dataclass
+class ExistingFile:
+    """既存ファイル情報"""
+    filename: str
+    base_token: str
+    quote_token: str
+    start_date: Optional[str] = None
+
+
+def get_existing_files(output_dir: Path) -> dict[str, list[ExistingFile]]:
     """
-    既存ファイルから期間情報を抽出。
-    戻り値: {パターン名: [(ファイル名, base_token, quote_token), ...]}
+    既存ファイルから情報を抽出。
+    戻り値: {パターン名: [ExistingFile, ...]}
     """
     existing = {p: [] for p in PATTERNS}
 
@@ -285,28 +294,46 @@ def get_existing_files(output_dir: Path) -> dict[str, list[tuple[str, str, str]]
         if match:
             pattern = match.group(1)
             if pattern in existing:
-                try:
-                    with open(json_file, "r") as f:
-                        # 先頭部分だけ読む
-                        content = f.read(2000)
-                        data = json.loads(content + "]}")  # 閉じて JSON としてパース
-                        base_token = data.get("base_token", "")
-                        quote_token = data.get("quote_token", "")
-                        existing[pattern].append((json_file.name, base_token, quote_token))
-                except (json.JSONDecodeError, KeyError):
-                    existing[pattern].append((json_file.name, "", ""))
+                with open(json_file, "r") as f:
+                    # 先頭 500 バイトだけ読む（ヘッダー部分のみ）
+                    content = f.read(500)
+
+                # 正規表現でフィールドを抽出
+                base_match = re.search(r'"base_token":\s*"([^"]+)"', content)
+                quote_match = re.search(r'"quote_token":\s*"([^"]+)"', content)
+                date_match = re.search(r"期間: (\d{4}-\d{2}-\d{2})", content)
+
+                existing[pattern].append(ExistingFile(
+                    filename=json_file.name,
+                    base_token=base_match.group(1) if base_match else "",
+                    quote_token=quote_match.group(1) if quote_match else "",
+                    start_date=date_match.group(1) if date_match else None,
+                ))
 
     return existing
 
 
-def get_next_file_number(existing: dict[str, list], pattern: str) -> int:
+def get_next_file_number(existing: dict[str, list[ExistingFile]], pattern: str) -> int:
     """次のファイル番号を取得"""
     max_num = 0
-    for filename, _, _ in existing.get(pattern, []):
-        match = re.match(rf"{pattern}-(\d+)\.json", filename)
+    for ef in existing.get(pattern, []):
+        match = re.match(rf"{pattern}-(\d+)\.json", ef.filename)
         if match:
             max_num = max(max_num, int(match.group(1)))
     return max_num + 1
+
+
+def is_duplicate(match: "PatternMatch", existing: list[ExistingFile]) -> bool:
+    """既存ファイルと重複しているかチェック"""
+    base_token, quote_token = match.token_pair.split("/")
+    start_str = match.start_date.strftime("%Y-%m-%d")
+
+    for ef in existing:
+        # 同じトークンペア・同じ開始日なら重複
+        if ef.base_token == base_token and ef.quote_token == quote_token:
+            if ef.start_date == start_str:
+                return True
+    return False
 
 
 def format_output_data(df: pd.DataFrame, pattern_match: PatternMatch) -> dict:
@@ -496,11 +523,23 @@ def main():
             if current_count >= args.max_per_pattern:
                 continue
 
+            # 重複チェック
+            if is_duplicate(match, existing[pattern]):
+                continue
+
             file_number = get_next_file_number(existing, pattern) + saved_count[pattern]
             filepath = save_pattern_data(conn, match, output_dir, file_number, args.dry_run)
 
             if filepath:
                 saved_count[pattern] += 1
+                # 保存したものを既存リストに追加（次の重複チェック用）
+                base_token, quote_token = match.token_pair.split("/")
+                existing[pattern].append(ExistingFile(
+                    filename=filepath.name,
+                    base_token=base_token,
+                    quote_token=quote_token,
+                    start_date=match.start_date.strftime("%Y-%m-%d"),
+                ))
                 if not args.dry_run:
                     print(f"保存: {filepath.name}")
 
