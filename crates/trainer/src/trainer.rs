@@ -13,7 +13,8 @@ use tracing::{debug, info, warn};
 
 /// Minimum data size to enable parallel model training.
 /// Below this threshold, sequential training is more efficient.
-const PARALLEL_TRAINING_THRESHOLD: usize = 50;
+/// Set to 200 based on benchmarks showing parallel overhead for smaller datasets.
+const PARALLEL_TRAINING_THRESHOLD: usize = 200;
 
 /// Port of Python's `HierarchicalTrainer`.
 ///

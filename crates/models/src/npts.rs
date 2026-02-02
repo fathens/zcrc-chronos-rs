@@ -6,7 +6,8 @@ use tracing::debug;
 
 /// Minimum number of candidate windows to trigger parallel computation.
 /// Below this threshold, sequential iteration is more efficient.
-const PARALLEL_THRESHOLD: usize = 100;
+/// Set to 1000 based on benchmarks showing parallel overhead dominates for smaller datasets.
+const PARALLEL_THRESHOLD: usize = 1000;
 
 /// NPTS (Non-Parametric Time Series) model.
 ///
