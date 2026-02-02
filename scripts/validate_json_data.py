@@ -171,9 +171,9 @@ def validate_days_span(
     first_ts = timestamps[0]
     last_ts = timestamps[-1]
 
-    # 日数を計算
+    # 日数を計算（四捨五入）
     delta = last_ts - first_ts
-    days = delta.days
+    days = round(delta.total_seconds() / 86400)
 
     # 30〜32 日の範囲であることを確認（許容範囲）
     if not (30 <= days <= 32):
