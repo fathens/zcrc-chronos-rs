@@ -384,7 +384,14 @@ impl TimeSeriesAnalyzer {
 
     // ---- Mann-Kendall Test ----
 
+    /// Maximum sample size for full O(n²) computation.
+    /// Above this, downsample to reduce computation while preserving statistical power.
+    const MANN_KENDALL_MAX_FULL: usize = 1000;
+
     /// Port of `_mann_kendall_test()`.
+    ///
+    /// For datasets larger than 1000 points, uses uniform downsampling
+    /// to reduce O(n²) complexity while maintaining statistical validity.
     pub fn mann_kendall_test(&self, values: &[f64]) -> MannKendallResult {
         let n = values.len();
         if n < 3 {
@@ -395,20 +402,36 @@ impl TimeSeriesAnalyzer {
             };
         }
 
-        // Compute S statistic
+        // For large datasets, downsample to reduce O(n²) complexity
+        let (sampled, sample_n) = if n > Self::MANN_KENDALL_MAX_FULL {
+            let step = n / Self::MANN_KENDALL_MAX_FULL;
+            let sampled: Vec<f64> = values.iter().step_by(step).copied().collect();
+            let sample_n = sampled.len();
+            debug!(
+                original_n = n,
+                sampled_n = sample_n,
+                step = step,
+                "Mann-Kendall downsampling applied"
+            );
+            (sampled, sample_n)
+        } else {
+            (values.to_vec(), n)
+        };
+
+        // Compute S statistic on (possibly sampled) data
         let mut s: i64 = 0;
-        for i in 0..n - 1 {
-            for j in (i + 1)..n {
-                if values[j] > values[i] {
+        for i in 0..sample_n - 1 {
+            for j in (i + 1)..sample_n {
+                if sampled[j] > sampled[i] {
                     s += 1;
-                } else if values[j] < values[i] {
+                } else if sampled[j] < sampled[i] {
                     s -= 1;
                 }
             }
         }
 
-        // Variance of S
-        let n_f = n as f64;
+        // Variance of S (based on sampled size)
+        let n_f = sample_n as f64;
         let var_s = n_f * (n_f - 1.0) * (2.0 * n_f + 5.0) / 18.0;
 
         // Standardized z
@@ -928,6 +951,28 @@ mod tests {
     fn test_mann_kendall_no_trend() {
         let analyzer = TimeSeriesAnalyzer::new();
         let vals = vec![5.0; 20];
+        let mk = analyzer.mann_kendall_test(&vals);
+        assert_eq!(mk.trend, "none");
+        assert_eq!(mk.s_statistic, 0);
+    }
+
+    #[test]
+    fn test_mann_kendall_large_dataset_downsampling() {
+        let analyzer = TimeSeriesAnalyzer::new();
+        // Large increasing trend (5000 points, above 1000 threshold)
+        let vals: Vec<f64> = (0..5000).map(|i| i as f64).collect();
+        let mk = analyzer.mann_kendall_test(&vals);
+        // Should still detect increasing trend despite downsampling
+        assert_eq!(mk.trend, "increasing");
+        assert!(mk.p_value < 0.05);
+        assert!(mk.s_statistic > 0);
+    }
+
+    #[test]
+    fn test_mann_kendall_large_dataset_no_trend() {
+        let analyzer = TimeSeriesAnalyzer::new();
+        // Large constant series (should detect no trend)
+        let vals = vec![100.0; 5000];
         let mk = analyzer.mann_kendall_test(&vals);
         assert_eq!(mk.trend, "none");
         assert_eq!(mk.s_statistic, 0);
