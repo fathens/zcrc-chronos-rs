@@ -1,7 +1,12 @@
 use chrono::NaiveDateTime;
 use common::{ChronosError, ForecastModel, ForecastOutput, ModelCategory, Result};
+use rayon::prelude::*;
 use scaler::{Scaler, StandardScaler};
 use tracing::debug;
+
+/// Minimum number of candidate windows to trigger parallel computation.
+/// Below this threshold, sequential iteration is more efficient.
+const PARALLEL_THRESHOLD: usize = 100;
 
 /// NPTS (Non-Parametric Time Series) model.
 ///
@@ -75,13 +80,25 @@ impl ForecastModel for NptsModel {
         }
 
         // Compute distances for all valid windows (on normalized values)
-        let mut candidates: Vec<(usize, f64)> = (0..=max_start)
-            .map(|start| {
-                let window = &normalized[start..start + context_len];
-                let dist = euclidean_distance(query, window);
-                (start, dist)
-            })
-            .collect();
+        // Use parallel iteration for large datasets, sequential for small ones
+        let mut candidates: Vec<(usize, f64)> = if max_start >= PARALLEL_THRESHOLD {
+            (0..=max_start)
+                .into_par_iter()
+                .map(|start| {
+                    let window = &normalized[start..start + context_len];
+                    let dist = euclidean_distance(query, window);
+                    (start, dist)
+                })
+                .collect()
+        } else {
+            (0..=max_start)
+                .map(|start| {
+                    let window = &normalized[start..start + context_len];
+                    let dist = euclidean_distance(query, window);
+                    (start, dist)
+                })
+                .collect()
+        };
 
         // Sort by distance and take top K
         candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
