@@ -7,8 +7,13 @@ use common::{
     Result, TimeAllocation,
 };
 use models::{EtsModel, MstlEtsModel, NptsModel, SeasonalNaiveModel, ThetaModel};
+use rayon::prelude::*;
 use selector::AdaptiveModelSelector;
 use tracing::{debug, info, warn};
+
+/// Minimum data size to enable parallel model training.
+/// Below this threshold, sequential training is more efficient.
+const PARALLEL_TRAINING_THRESHOLD: usize = 50;
 
 /// Port of Python's `HierarchicalTrainer`.
 ///
@@ -174,6 +179,8 @@ impl HierarchicalTrainer {
     /// `holdout_len` points are withheld, the model is trained on the
     /// remainder, and its forecast is compared to the held-out values.
     /// The final forecast is then produced from the full data.
+    ///
+    /// Uses parallel processing for datasets above `PARALLEL_TRAINING_THRESHOLD`.
     fn train_stage(
         &self,
         values: &[f64],
@@ -183,52 +190,52 @@ impl HierarchicalTrainer {
         excluded_models: &[String],
         season_period: Option<usize>,
     ) -> Vec<(ForecastOutput, f64)> {
-        let mut results = Vec::new();
-
         let n = values.len();
         // Holdout size: same as forecast horizon, but capped to leave enough training data
         let min_train = 10;
         let holdout_len = horizon.min(n.saturating_sub(min_train)).max(1);
         let can_holdout = n > min_train + holdout_len;
 
-        for model_name in model_names {
-            if excluded_models.contains(model_name) {
-                continue;
-            }
+        // Filter excluded models first
+        let active_models: Vec<&String> = model_names
+            .iter()
+            .filter(|name| !excluded_models.contains(name))
+            .collect();
 
-            // Score via holdout CV
-            let score = if can_holdout {
-                evaluate_holdout(values, timestamps, model_name, holdout_len, season_period)
-            } else {
-                1.0 // insufficient data for holdout; neutral score
-            };
+        // Use parallel training for larger datasets with multiple models
+        let use_parallel = n >= PARALLEL_TRAINING_THRESHOLD && active_models.len() > 1;
 
-            // Full-data forecast
-            let mut model: Box<dyn ForecastModel> =
-                match create_model(model_name, values, season_period) {
-                    Some(m) => m,
-                    None => {
-                        debug!(model = %model_name, "Unknown model, skipping");
-                        continue;
-                    }
-                };
-
-            match model.fit_predict(values, timestamps, horizon) {
-                Ok(forecast) => {
-                    debug!(
-                        model = %model_name,
-                        score = format!("{:.4}", score),
-                        "Model training complete"
-                    );
-                    results.push((forecast, score));
-                }
-                Err(e) => {
-                    warn!(model = %model_name, error = %e, "Model training failed");
-                }
-            }
+        if use_parallel {
+            active_models
+                .par_iter()
+                .filter_map(|model_name| {
+                    train_single_model(
+                        model_name,
+                        values,
+                        timestamps,
+                        horizon,
+                        holdout_len,
+                        can_holdout,
+                        season_period,
+                    )
+                })
+                .collect()
+        } else {
+            active_models
+                .iter()
+                .filter_map(|model_name| {
+                    train_single_model(
+                        model_name,
+                        values,
+                        timestamps,
+                        horizon,
+                        holdout_len,
+                        can_holdout,
+                        season_period,
+                    )
+                })
+                .collect()
         }
-
-        results
     }
 
     fn should_stop_early(&self, current_stage: &str) -> bool {
@@ -313,6 +320,42 @@ pub struct StageSummary {
 }
 
 // ---- Helper functions ----
+
+/// Train a single model with holdout evaluation and full-data forecast.
+fn train_single_model(
+    model_name: &str,
+    values: &[f64],
+    timestamps: &[NaiveDateTime],
+    horizon: usize,
+    holdout_len: usize,
+    can_holdout: bool,
+    season_period: Option<usize>,
+) -> Option<(ForecastOutput, f64)> {
+    // Score via holdout CV
+    let score = if can_holdout {
+        evaluate_holdout(values, timestamps, model_name, holdout_len, season_period)
+    } else {
+        1.0 // insufficient data for holdout; neutral score
+    };
+
+    // Full-data forecast
+    let mut model: Box<dyn ForecastModel> = create_model(model_name, values, season_period)?;
+
+    match model.fit_predict(values, timestamps, horizon) {
+        Ok(forecast) => {
+            debug!(
+                model = %model_name,
+                score = format!("{:.4}", score),
+                "Model training complete"
+            );
+            Some((forecast, score))
+        }
+        Err(e) => {
+            warn!(model = %model_name, error = %e, "Model training failed");
+            None
+        }
+    }
+}
 
 fn calculate_time_allocation(
     allocation: &TimeAllocation,
