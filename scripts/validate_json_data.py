@@ -46,11 +46,29 @@ class ValidationResult:
     db_found: int = 0
     price_checked: int = 0
     price_valid: int = 0
+    days_span: int | None = None
     errors: list[ValidationError] = field(default_factory=list)
 
     @property
     def is_ok(self) -> bool:
         return len(self.errors) == 0
+
+    @property
+    def db_ok(self) -> bool:
+        """DB 確認が成功したか"""
+        return not any(e.error_type in ("db_not_found", "rate_mismatch", "invalid_rate")
+                       for e in self.errors)
+
+    @property
+    def price_ok(self) -> bool:
+        """price 計算が成功したか"""
+        return not any(e.error_type in ("price_mismatch", "invalid_number")
+                       for e in self.errors)
+
+    @property
+    def days_ok(self) -> bool:
+        """日数チェックが成功したか"""
+        return not any(e.error_type == "invalid_days_span" for e in self.errors)
 
 
 def get_db_connection():
@@ -127,6 +145,46 @@ def validate_db_existence(
                     found += 1
 
     return checked, found, errors
+
+
+def validate_days_span(
+    data_points: list[dict],
+) -> tuple[int | None, list[ValidationError]]:
+    """データが 31 日間であることを確認
+
+    Returns:
+        tuple[int | None, list[ValidationError]]: (日数, エラーリスト)
+    """
+    errors = []
+
+    if len(data_points) < 2:
+        errors.append(ValidationError(
+            index=-1,
+            timestamp="",
+            error_type="invalid_days_span",
+            message=f"Not enough data points to calculate days span: {len(data_points)} points",
+        ))
+        return None, errors
+
+    # タイムスタンプをソートして最初と最後を取得
+    timestamps = sorted(parse_timestamp(p["timestamp"]) for p in data_points)
+    first_ts = timestamps[0]
+    last_ts = timestamps[-1]
+
+    # 日数を計算
+    delta = last_ts - first_ts
+    days = delta.days
+
+    # 30〜32 日の範囲であることを確認（許容範囲）
+    if not (30 <= days <= 32):
+        errors.append(ValidationError(
+            index=-1,
+            timestamp="",
+            error_type="invalid_days_span",
+            message=f"Days span out of range: {days} days (expected 30-32 days, from {first_ts} to {last_ts})",
+        ))
+
+    return days, errors
 
 
 def validate_price_calculation(
@@ -238,6 +296,11 @@ def validate_json_file(file_path: Path, conn) -> ValidationResult:
     result.price_valid = valid
     result.errors.extend(price_errors)
 
+    # 日数チェック
+    days, days_errors = validate_days_span(data_points)
+    result.days_span = days
+    result.errors.extend(days_errors)
+
     return result
 
 
@@ -246,14 +309,23 @@ def print_result(result: ValidationResult, verbose: bool = False) -> None:
     status = "OK" if result.is_ok else "NG"
     print(f"[{status}] {result.file_path}")
 
-    if result.is_ok:
-        print(f"     データ点数: {result.total_points}")
-        print(f"     DB 確認: {result.db_found}/{result.db_checked} OK")
-        print(f"     price 検証: {result.price_valid}/{result.price_checked} OK")
-    else:
-        print(f"     データ点数: {result.total_points}")
-        print(f"     DB 確認: {result.db_found}/{result.db_checked} OK")
-        print(f"     price 検証: {result.price_valid}/{result.price_checked} OK")
+    # 各チェック項目の結果を個別に表示
+    print(f"     データ点数: {result.total_points}")
+
+    # DB 確認の結果
+    db_status = "OK" if result.db_ok else "NG"
+    print(f"     DB 確認: [{db_status}] {result.db_found}/{result.db_checked}")
+
+    # price 検証の結果
+    price_status = "OK" if result.price_ok else "NG"
+    print(f"     price 検証: [{price_status}] {result.price_valid}/{result.price_checked}")
+
+    # 日数チェックの結果
+    days_status = "OK" if result.days_ok else "NG"
+    days_str = f"{result.days_span} 日" if result.days_span is not None else "N/A"
+    print(f"     日数チェック: [{days_status}] {days_str}")
+
+    if not result.is_ok:
         print(f"     エラー数: {len(result.errors)}")
 
         if verbose:
