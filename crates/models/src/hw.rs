@@ -438,6 +438,8 @@ fn optimize_params(values: &[f64], m: usize, spec: HwSpec) -> HwParams {
 
     let bounds = NelderMeadBounds { lower, upper };
 
+    // Reduced iterations (200 vs 500) and relaxed tolerance (1e-6 vs 1e-8)
+    // for faster convergence with minimal accuracy loss
     let best = nelder_mead(
         |params| {
             let hw_params = unpack_params(params, spec);
@@ -451,8 +453,8 @@ fn optimize_params(values: &[f64], m: usize, spec: HwSpec) -> HwParams {
         },
         &initial,
         &bounds,
-        500,
-        1e-8,
+        200,
+        1e-6,
     );
 
     unpack_params(&best, spec)

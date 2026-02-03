@@ -87,7 +87,7 @@ impl ForecastModel for NptsModel {
                 .into_par_iter()
                 .map(|start| {
                     let window = &normalized[start..start + context_len];
-                    let dist = euclidean_distance(query, window);
+                    let dist = squared_euclidean_distance(query, window);
                     (start, dist)
                 })
                 .collect()
@@ -95,7 +95,7 @@ impl ForecastModel for NptsModel {
             (0..=max_start)
                 .map(|start| {
                     let window = &normalized[start..start + context_len];
-                    let dist = euclidean_distance(query, window);
+                    let dist = squared_euclidean_distance(query, window);
                     (start, dist)
                 })
                 .collect()
@@ -106,8 +106,11 @@ impl ForecastModel for NptsModel {
         let k = self.k.min(candidates.len());
         let top_k = &candidates[..k];
 
-        // Inverse-distance weighting
-        let weights: Vec<f64> = top_k.iter().map(|(_, d)| 1.0 / (d + 1e-10)).collect();
+        // Inverse-distance weighting (apply sqrt here since we stored squared distances)
+        let weights: Vec<f64> = top_k
+            .iter()
+            .map(|(_, d_sq)| 1.0 / (d_sq.sqrt() + 1e-10))
+            .collect();
         let total_weight: f64 = weights.iter().sum();
 
         // Weighted average of the subsequent values (on normalized values)
@@ -139,12 +142,13 @@ impl ForecastModel for NptsModel {
     }
 }
 
-fn euclidean_distance(a: &[f64], b: &[f64]) -> f64 {
+/// Squared Euclidean distance (omits sqrt for K-NN ranking efficiency).
+/// Since sqrt is monotonic, relative ordering is preserved without it.
+fn squared_euclidean_distance(a: &[f64], b: &[f64]) -> f64 {
     a.iter()
         .zip(b.iter())
         .map(|(x, y)| (x - y).powi(2))
         .sum::<f64>()
-        .sqrt()
 }
 
 #[cfg(test)]

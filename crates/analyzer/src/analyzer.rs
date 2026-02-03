@@ -6,7 +6,14 @@ use common::{
 use num_complex::Complex;
 use rustfft::FftPlanner;
 use statrs::distribution::{ContinuousCDF, Normal};
+use std::cell::RefCell;
+use std::collections::HashSet;
 use tracing::{debug, info, warn};
+
+// Thread-local FFT planner to avoid repeated allocation
+thread_local! {
+    static FFT_PLANNER: RefCell<FftPlanner<f64>> = RefCell::new(FftPlanner::new());
+}
 
 /// Port of Python's `TimeSeriesAnalyzer` class.
 pub struct TimeSeriesAnalyzer;
@@ -148,9 +155,11 @@ impl TimeSeriesAnalyzer {
         let mut buffer: Vec<Complex<f64>> =
             detrended.iter().map(|&v| Complex::new(v, 0.0)).collect();
 
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(n);
-        fft.process(&mut buffer);
+        // Reuse thread-local FFT planner to avoid repeated allocation
+        FFT_PLANNER.with(|planner| {
+            let fft = planner.borrow_mut().plan_fft_forward(n);
+            fft.process(&mut buffer);
+        });
 
         // Power spectrum
         let power: Vec<f64> = buffer.iter().map(|c| c.norm_sqr()).collect();
@@ -566,10 +575,10 @@ impl TimeSeriesAnalyzer {
             .map(|(i, _)| i)
             .collect();
 
-        // Z-score outliers
+        // Z-score outliers (using HashSet for O(1) lookup during intersection)
         let m = mean(values);
         let sd = std_dev_population(values);
-        let z_outliers: Vec<usize> = if sd > 0.0 {
+        let z_outliers: HashSet<usize> = if sd > 0.0 {
             values
                 .iter()
                 .enumerate()
@@ -577,7 +586,7 @@ impl TimeSeriesAnalyzer {
                 .map(|(i, _)| i)
                 .collect()
         } else {
-            vec![]
+            HashSet::new()
         };
 
         // Intersection: both methods must agree
@@ -775,13 +784,26 @@ fn median(data: &[f64]) -> f64 {
     if data.is_empty() {
         return 0.0;
     }
-    let mut sorted = data.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = sorted.len();
+    let mut buf = data.to_vec();
+    let n = buf.len();
+    let mid = n / 2;
+    // Use quickselect (O(n) average) instead of full sort (O(n log n))
+    buf.select_nth_unstable_by(mid, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
     if n.is_multiple_of(2) {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+        // For even length, need both mid-1 and mid elements
+        // After first select, buf[mid] is the upper-middle element
+        let val_mid = buf[mid];
+        // Find max of elements in 0..mid to get the lower-middle element
+        let val_lower = buf[..mid]
+            .iter()
+            .copied()
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(val_mid);
+        (val_lower + val_mid) / 2.0
     } else {
-        sorted[n / 2]
+        buf[mid]
     }
 }
 
