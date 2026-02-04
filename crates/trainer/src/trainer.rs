@@ -152,7 +152,7 @@ impl HierarchicalTrainer {
         );
 
         // Ensemble: inverse-MAE weighted average
-        let ensemble = inverse_mae_ensemble(&filtered, horizon);
+        let ensemble = softmax_ensemble(&filtered, horizon);
 
         let total_time = start.elapsed().as_secs_f64();
         let metadata = TrainingMetadata {
@@ -492,15 +492,31 @@ fn filter_by_score(forecasts: &[(ForecastOutput, f64)]) -> Vec<(ForecastOutput, 
     }
 }
 
-/// Inverse-MAE weighted ensemble of multiple forecasts.
-fn inverse_mae_ensemble(forecasts: &[(ForecastOutput, f64)], horizon: usize) -> ForecastOutput {
+/// Softmax-weighted ensemble of multiple forecasts.
+///
+/// Uses softmax(-score / temperature) to compute weights. Lower scores get higher weights.
+/// Temperature controls weight concentration: lower = more concentrated on best models.
+fn softmax_ensemble(forecasts: &[(ForecastOutput, f64)], horizon: usize) -> ForecastOutput {
     if forecasts.len() == 1 {
         return forecasts[0].0.clone();
     }
 
-    // Weights = 1 / (score + epsilon)
-    let weights: Vec<f64> = forecasts.iter().map(|(_, s)| 1.0 / (s + 1e-10)).collect();
-    let total_weight: f64 = weights.iter().sum();
+    // Softmax weighting with temperature parameter
+    // temperature = 0.5 gives good balance between best model and diversity
+    let temperature = 0.5;
+
+    // Find min score for numerical stability (subtract before exp)
+    let min_score = forecasts
+        .iter()
+        .map(|(_, s)| *s)
+        .fold(f64::INFINITY, f64::min);
+
+    // Compute softmax weights: exp(-(score - min_score) / temperature)
+    let exp_weights: Vec<f64> = forecasts
+        .iter()
+        .map(|(_, s)| (-(s - min_score) / temperature).exp())
+        .collect();
+    let total_weight: f64 = exp_weights.iter().sum();
 
     let mut mean = vec![0.0; horizon];
     let mut lower = vec![0.0; horizon];
@@ -508,7 +524,7 @@ fn inverse_mae_ensemble(forecasts: &[(ForecastOutput, f64)], horizon: usize) -> 
     let mut has_intervals = false;
 
     for (idx, (forecast, _)) in forecasts.iter().enumerate() {
-        let w = weights[idx] / total_weight;
+        let w = exp_weights[idx] / total_weight;
         for h in 0..horizon.min(forecast.mean.len()) {
             mean[h] += w * forecast.mean[h];
         }

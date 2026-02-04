@@ -61,7 +61,7 @@ fn test_hierarchical_constant_data() {
 }
 
 #[test]
-fn test_inverse_mae_ensemble() {
+fn test_softmax_ensemble() {
     let f1 = ForecastOutput {
         mean: vec![10.0, 20.0],
         lower_quantile: None,
@@ -76,7 +76,7 @@ fn test_inverse_mae_ensemble() {
     };
 
     // Equal scores → equal weights → simple average
-    let ensemble = inverse_mae_ensemble(&[(f1, 0.5), (f2, 0.5)], 2);
+    let ensemble = softmax_ensemble(&[(f1, 0.5), (f2, 0.5)], 2);
     assert_eq!(ensemble.mean.len(), 2);
     // With equal weights: (10+30)/2=20, (20+40)/2=30
     assert!((ensemble.mean[0] - 20.0).abs() < 0.01);
@@ -84,7 +84,7 @@ fn test_inverse_mae_ensemble() {
 }
 
 #[test]
-fn test_inverse_mae_ensemble_weighted() {
+fn test_softmax_ensemble_weighted() {
     let f1 = ForecastOutput {
         mean: vec![100.0],
         lower_quantile: None,
@@ -98,11 +98,12 @@ fn test_inverse_mae_ensemble_weighted() {
         model_name: "Bad".into(),
     };
 
-    // f1 has much better score (0.01) vs f2 (1.0) → f1 dominates
-    let ensemble = inverse_mae_ensemble(&[(f1, 0.01), (f2, 1.0)], 1);
-    // f1 weight: 1/0.01 = 100, f2 weight: 1/1.0 = 1 → f1 dominates
+    // f1 has much better score (0.01) vs f2 (1.0) → f1 dominates with softmax
+    let ensemble = softmax_ensemble(&[(f1, 0.01), (f2, 1.0)], 1);
+    // With temperature=0.5, score diff of 0.99 → exp(-0.99/0.5) ≈ 0.14 weight for f2
+    // f1 dominates heavily
     assert!(
-        ensemble.mean[0] < 110.0,
+        ensemble.mean[0] < 120.0,
         "Expected ~100, got {}",
         ensemble.mean[0]
     );
