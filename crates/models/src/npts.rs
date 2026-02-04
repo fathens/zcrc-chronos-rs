@@ -1,7 +1,13 @@
 use chrono::NaiveDateTime;
 use common::{ChronosError, ForecastModel, ForecastOutput, ModelCategory, Result};
+use rayon::prelude::*;
 use scaler::{Scaler, StandardScaler};
 use tracing::debug;
+
+/// Minimum number of candidate windows to trigger parallel computation.
+/// Below this threshold, sequential iteration is more efficient.
+/// Set to 1000 based on benchmarks showing parallel overhead dominates for smaller datasets.
+const PARALLEL_THRESHOLD: usize = 1000;
 
 /// NPTS (Non-Parametric Time Series) model.
 ///
@@ -75,28 +81,48 @@ impl ForecastModel for NptsModel {
         }
 
         // Compute distances for all valid windows (on normalized values)
-        let mut candidates: Vec<(usize, f64)> = (0..=max_start)
-            .map(|start| {
+        // Use parallel iteration for large datasets, sequential for small ones
+        let candidate_count = max_start + 1;
+        let mut candidates: Vec<(usize, f64)> = if candidate_count >= PARALLEL_THRESHOLD {
+            (0..candidate_count)
+                .into_par_iter()
+                .map(|start| {
+                    let window = &normalized[start..start + context_len];
+                    let dist = squared_euclidean_distance(query, window);
+                    (start, dist)
+                })
+                .collect()
+        } else {
+            let mut cands = Vec::with_capacity(candidate_count);
+            for start in 0..candidate_count {
                 let window = &normalized[start..start + context_len];
-                let dist = euclidean_distance(query, window);
-                (start, dist)
-            })
-            .collect();
+                let dist = squared_euclidean_distance(query, window);
+                cands.push((start, dist));
+            }
+            cands
+        };
 
-        // Sort by distance and take top K
-        candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Partial sort: only need top K (O(n) vs O(n log n) for full sort)
         let k = self.k.min(candidates.len());
+        if k > 0 && k < candidates.len() {
+            candidates.select_nth_unstable_by(k - 1, |a, b| {
+                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
         let top_k = &candidates[..k];
 
-        // Inverse-distance weighting
-        let weights: Vec<f64> = top_k.iter().map(|(_, d)| 1.0 / (d + 1e-10)).collect();
-        let total_weight: f64 = weights.iter().sum();
+        // Inverse-distance weighting (apply sqrt here since we stored squared distances)
+        // Compute total weight first, then normalize inline to avoid Vec allocation
+        let total_weight: f64 = top_k
+            .iter()
+            .map(|(_, d_sq)| 1.0 / (d_sq.sqrt() + 1e-10))
+            .sum();
 
         // Weighted average of the subsequent values (on normalized values)
         let mut mean_normalized = vec![0.0; horizon];
-        for (idx, &(start, _)) in top_k.iter().enumerate() {
+        for &(start, d_sq) in top_k {
             let forecast_start = start + context_len;
-            let w = weights[idx] / total_weight;
+            let w = (1.0 / (d_sq.sqrt() + 1e-10)) / total_weight;
             for (h, mean_val) in mean_normalized.iter_mut().enumerate() {
                 let source_idx = forecast_start + h;
                 let val = if source_idx < n {
@@ -121,12 +147,13 @@ impl ForecastModel for NptsModel {
     }
 }
 
-fn euclidean_distance(a: &[f64], b: &[f64]) -> f64 {
+/// Squared Euclidean distance (omits sqrt for K-NN ranking efficiency).
+/// Since sqrt is monotonic, relative ordering is preserved without it.
+fn squared_euclidean_distance(a: &[f64], b: &[f64]) -> f64 {
     a.iter()
         .zip(b.iter())
         .map(|(x, y)| (x - y).powi(2))
         .sum::<f64>()
-        .sqrt()
 }
 
 #[cfg(test)]

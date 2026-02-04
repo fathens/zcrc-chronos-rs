@@ -1,0 +1,42 @@
+[package]
+name = "benchmarks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+analyzer = { workspace = true }
+common = { workspace = true }
+models = { workspace = true }
+normalize = { workspace = true }
+predictor = { workspace = true }
+trainer = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "analyzer_bench"
+harness = false
+
+[[bench]]
+name = "normalize_bench"
+harness = false
+
+[[bench]]
+name = "models_bench"
+harness = false
+
+[[bench]]
+name = "npts_bench"
+harness = false
+
+[[bench]]
+name = "trainer_bench"
+harness = false
+
+[[bench]]
+name = "pipeline_bench"
+harness = false

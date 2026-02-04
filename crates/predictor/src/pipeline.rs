@@ -49,8 +49,8 @@ fn calculate_median_interval(timestamps: &[NaiveDateTime]) -> i64 {
         .windows(2)
         .map(|w| (w[1] - w[0]).num_seconds())
         .collect();
-    intervals.sort();
-    intervals[intervals.len() / 2].max(1)
+    let mid = intervals.len() / 2;
+    (*intervals.select_nth_unstable(mid).1).max(1)
 }
 
 /// Convert TimeDelta to steps based on median sampling interval.

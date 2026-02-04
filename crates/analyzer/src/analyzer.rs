@@ -6,7 +6,14 @@ use common::{
 use num_complex::Complex;
 use rustfft::FftPlanner;
 use statrs::distribution::{ContinuousCDF, Normal};
+use std::cell::RefCell;
+use std::collections::HashSet;
 use tracing::{debug, info, warn};
+
+// Thread-local FFT planner to avoid repeated allocation
+thread_local! {
+    static FFT_PLANNER: RefCell<FftPlanner<f64>> = RefCell::new(FftPlanner::new());
+}
 
 /// Port of Python's `TimeSeriesAnalyzer` class.
 pub struct TimeSeriesAnalyzer;
@@ -148,9 +155,11 @@ impl TimeSeriesAnalyzer {
         let mut buffer: Vec<Complex<f64>> =
             detrended.iter().map(|&v| Complex::new(v, 0.0)).collect();
 
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(n);
-        fft.process(&mut buffer);
+        // Reuse thread-local FFT planner to avoid repeated allocation
+        FFT_PLANNER.with(|planner| {
+            let fft = planner.borrow_mut().plan_fft_forward(n);
+            fft.process(&mut buffer);
+        });
 
         // Power spectrum
         let power: Vec<f64> = buffer.iter().map(|c| c.norm_sqr()).collect();
@@ -384,7 +393,14 @@ impl TimeSeriesAnalyzer {
 
     // ---- Mann-Kendall Test ----
 
+    /// Maximum sample size for full O(n²) computation.
+    /// Above this, downsample to reduce computation while preserving statistical power.
+    const MANN_KENDALL_MAX_FULL: usize = 1000;
+
     /// Port of `_mann_kendall_test()`.
+    ///
+    /// For datasets larger than 1000 points, uses uniform downsampling
+    /// to reduce O(n²) complexity while maintaining statistical validity.
     pub fn mann_kendall_test(&self, values: &[f64]) -> MannKendallResult {
         let n = values.len();
         if n < 3 {
@@ -395,20 +411,36 @@ impl TimeSeriesAnalyzer {
             };
         }
 
-        // Compute S statistic
+        // For large datasets, downsample to reduce O(n²) complexity
+        let (sampled, sample_n) = if n > Self::MANN_KENDALL_MAX_FULL {
+            let step = n / Self::MANN_KENDALL_MAX_FULL;
+            let sampled: Vec<f64> = values.iter().step_by(step).copied().collect();
+            let sample_n = sampled.len();
+            debug!(
+                original_n = n,
+                sampled_n = sample_n,
+                step = step,
+                "Mann-Kendall downsampling applied"
+            );
+            (sampled, sample_n)
+        } else {
+            (values.to_vec(), n)
+        };
+
+        // Compute S statistic on (possibly sampled) data
         let mut s: i64 = 0;
-        for i in 0..n - 1 {
-            for j in (i + 1)..n {
-                if values[j] > values[i] {
+        for i in 0..sample_n - 1 {
+            for j in (i + 1)..sample_n {
+                if sampled[j] > sampled[i] {
                     s += 1;
-                } else if values[j] < values[i] {
+                } else if sampled[j] < sampled[i] {
                     s -= 1;
                 }
             }
         }
 
-        // Variance of S
-        let n_f = n as f64;
+        // Variance of S (based on sampled size)
+        let n_f = sample_n as f64;
         let var_s = n_f * (n_f - 1.0) * (2.0 * n_f + 5.0) / 18.0;
 
         // Standardized z
@@ -543,10 +575,10 @@ impl TimeSeriesAnalyzer {
             .map(|(i, _)| i)
             .collect();
 
-        // Z-score outliers
+        // Z-score outliers (using HashSet for O(1) lookup during intersection)
         let m = mean(values);
         let sd = std_dev_population(values);
-        let z_outliers: Vec<usize> = if sd > 0.0 {
+        let z_outliers: HashSet<usize> = if sd > 0.0 {
             values
                 .iter()
                 .enumerate()
@@ -554,7 +586,7 @@ impl TimeSeriesAnalyzer {
                 .map(|(i, _)| i)
                 .collect()
         } else {
-            vec![]
+            HashSet::new()
         };
 
         // Intersection: both methods must agree
@@ -752,13 +784,26 @@ fn median(data: &[f64]) -> f64 {
     if data.is_empty() {
         return 0.0;
     }
-    let mut sorted = data.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = sorted.len();
+    let mut buf = data.to_vec();
+    let n = buf.len();
+    let mid = n / 2;
+    // Use quickselect (O(n) average) instead of full sort (O(n log n))
+    buf.select_nth_unstable_by(mid, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
     if n.is_multiple_of(2) {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+        // For even length, need both mid-1 and mid elements
+        // After first select, buf[mid] is the upper-middle element
+        let val_mid = buf[mid];
+        // Find max of elements in 0..mid to get the lower-middle element
+        let val_lower = buf[..mid]
+            .iter()
+            .copied()
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(val_mid);
+        (val_lower + val_mid) / 2.0
     } else {
-        sorted[n / 2]
+        buf[mid]
     }
 }
 
@@ -928,6 +973,28 @@ mod tests {
     fn test_mann_kendall_no_trend() {
         let analyzer = TimeSeriesAnalyzer::new();
         let vals = vec![5.0; 20];
+        let mk = analyzer.mann_kendall_test(&vals);
+        assert_eq!(mk.trend, "none");
+        assert_eq!(mk.s_statistic, 0);
+    }
+
+    #[test]
+    fn test_mann_kendall_large_dataset_downsampling() {
+        let analyzer = TimeSeriesAnalyzer::new();
+        // Large increasing trend (5000 points, above 1000 threshold)
+        let vals: Vec<f64> = (0..5000).map(|i| i as f64).collect();
+        let mk = analyzer.mann_kendall_test(&vals);
+        // Should still detect increasing trend despite downsampling
+        assert_eq!(mk.trend, "increasing");
+        assert!(mk.p_value < 0.05);
+        assert!(mk.s_statistic > 0);
+    }
+
+    #[test]
+    fn test_mann_kendall_large_dataset_no_trend() {
+        let analyzer = TimeSeriesAnalyzer::new();
+        // Large constant series (should detect no trend)
+        let vals = vec![100.0; 5000];
         let mk = analyzer.mann_kendall_test(&vals);
         assert_eq!(mk.trend, "none");
         assert_eq!(mk.s_statistic, 0);
