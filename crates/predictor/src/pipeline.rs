@@ -170,13 +170,17 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
 
     // Step 4: Hierarchical training + ensemble (with detected season period)
     let mut trainer = HierarchicalTrainer::default();
+    let hints = trainer::TrainingHints {
+        season_period,
+        volatility: Some(characteristics.volatility),
+    };
     let (forecast, metadata) = trainer.train_hierarchically(
         &train_values,
         &norm_timestamps,
         &strategy,
         time_budget,
         horizon_steps,
-        season_period,
+        hints,
     )?;
 
     // Step 5: Inverse transform if log was applied

@@ -34,7 +34,7 @@ fn test_hierarchical_basic() {
     let strategy = make_strategy();
 
     let (forecast, metadata) = trainer
-        .train_hierarchically(&values, &ts, &strategy, 60.0, 5, None)
+        .train_hierarchically(&values, &ts, &strategy, 60.0, 5, TrainingHints::default())
         .unwrap();
 
     assert_eq!(forecast.mean.len(), 5);
@@ -50,7 +50,7 @@ fn test_hierarchical_constant_data() {
     let strategy = make_strategy();
 
     let (forecast, _) = trainer
-        .train_hierarchically(&values, &ts, &strategy, 30.0, 3, None)
+        .train_hierarchically(&values, &ts, &strategy, 30.0, 3, TrainingHints::default())
         .unwrap();
 
     assert_eq!(forecast.mean.len(), 3);
@@ -143,7 +143,7 @@ fn make_forecast(name: &str) -> ForecastOutput {
 fn test_filter_by_score_removes_outliers() {
     // best=0.5, threshold=max(0.5*3, 2.0)=2.0 → score=8.0 excluded
     let forecasts = vec![(make_forecast("Good"), 0.5), (make_forecast("Bad"), 8.0)];
-    let filtered = filter_by_score(&forecasts);
+    let filtered = filter_by_score(&forecasts, None);
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].0.model_name, "Good");
 }
@@ -156,7 +156,7 @@ fn test_filter_by_score_keeps_all_when_similar() {
         (make_forecast("B"), 1.0),
         (make_forecast("C"), 1.2),
     ];
-    let filtered = filter_by_score(&forecasts);
+    let filtered = filter_by_score(&forecasts, None);
     assert_eq!(filtered.len(), 3);
 }
 
@@ -170,7 +170,7 @@ fn test_filter_by_score_fallback_single() {
         (make_forecast("Worse1"), 5.0),
         (make_forecast("Worse2"), 10.0),
     ];
-    let filtered = filter_by_score(&forecasts);
+    let filtered = filter_by_score(&forecasts, None);
     // threshold = max(0.1*3, 2.0) = 2.0
     // Best(0.1) passes, Worse1(5.0) and Worse2(10.0) filtered out
     assert_eq!(filtered.len(), 1);
@@ -180,14 +180,14 @@ fn test_filter_by_score_fallback_single() {
 #[test]
 fn test_filter_by_score_single_model() {
     let forecasts = vec![(make_forecast("Only"), 5.0)];
-    let filtered = filter_by_score(&forecasts);
+    let filtered = filter_by_score(&forecasts, None);
     assert_eq!(filtered.len(), 1);
 }
 
 #[test]
 fn test_filter_by_score_empty() {
     let forecasts: Vec<(ForecastOutput, f64)> = vec![];
-    let filtered = filter_by_score(&forecasts);
+    let filtered = filter_by_score(&forecasts, None);
     assert!(filtered.is_empty());
 }
 
@@ -200,7 +200,7 @@ fn test_filter_by_score_high_best_keeps_all() {
         (make_forecast("B"), 8.0),
         (make_forecast("C"), 12.0),
     ];
-    let filtered = filter_by_score(&forecasts);
+    let filtered = filter_by_score(&forecasts, None);
     assert_eq!(filtered.len(), 3);
 }
 

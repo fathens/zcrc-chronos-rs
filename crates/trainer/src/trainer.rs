@@ -16,6 +16,15 @@ use tracing::{debug, info, warn};
 /// Set to 200 based on benchmarks showing parallel overhead for smaller datasets.
 const PARALLEL_TRAINING_THRESHOLD: usize = 200;
 
+/// Optional parameters for hierarchical training from time series analysis.
+#[derive(Default, Clone)]
+pub struct TrainingHints {
+    /// Detected seasonal period (forwarded to seasonal models).
+    pub season_period: Option<usize>,
+    /// Coefficient of variation (used to adjust filtering thresholds).
+    pub volatility: Option<f64>,
+}
+
 /// Port of Python's `HierarchicalTrainer`.
 ///
 /// Orchestrates staged model training: fast → medium → advanced.
@@ -39,9 +48,9 @@ impl HierarchicalTrainer {
 
     /// Run hierarchical training and return the best ensemble forecast.
     ///
-    /// `season_period` is the detected seasonal period (from the analyzer).
-    /// When provided, it is forwarded to models that support seasonality
-    /// (SeasonalNaive, ETS).
+    /// `hints` contains optional parameters from time series analysis:
+    /// - `season_period`: forwarded to seasonal models (SeasonalNaive, ETS)
+    /// - `volatility`: used to adjust model filtering thresholds
     pub fn train_hierarchically(
         &mut self,
         values: &[f64],
@@ -49,8 +58,10 @@ impl HierarchicalTrainer {
         strategy: &ModelSelectionStrategy,
         time_budget_secs: f64,
         horizon: usize,
-        season_period: Option<usize>,
+        hints: TrainingHints,
     ) -> Result<(ForecastOutput, TrainingMetadata)> {
+        let season_period = hints.season_period;
+        let volatility = hints.volatility;
         info!("Starting hierarchical training");
 
         let start = Instant::now();
@@ -144,7 +155,7 @@ impl HierarchicalTrainer {
         }
 
         // Filter out poor-performing models before ensembling
-        let filtered = filter_by_score(&all_forecasts);
+        let filtered = filter_by_score(&all_forecasts, volatility);
         info!(
             before = all_forecasts.len(),
             after = filtered.len(),
@@ -457,11 +468,15 @@ fn evaluate_holdout(
 /// This prevents poor-performing models (e.g., non-seasonal models on seasonal data)
 /// from diluting ensemble accuracy.
 ///
-/// Threshold: max(best_score * 3.0, 2.0)
-/// - best=0.5 → threshold=2.0 → Theta(MASE~8) excluded
-/// - best=0.01 → threshold=2.0 → nearly all models pass
-/// - best=5.0 → threshold=15.0 → all models pass (data is hard for everyone)
-fn filter_by_score(forecasts: &[(ForecastOutput, f64)]) -> Vec<(ForecastOutput, f64)> {
+/// Base threshold: max(best_score * multiplier, floor)
+/// The multiplier is adjusted based on volatility:
+/// - High volatility (>0.3): multiplier=5.0 (more lenient)
+/// - Low volatility (<0.05): multiplier=2.0 (stricter)
+/// - Default: multiplier=3.0
+fn filter_by_score(
+    forecasts: &[(ForecastOutput, f64)],
+    volatility: Option<f64>,
+) -> Vec<(ForecastOutput, f64)> {
     if forecasts.len() <= 1 {
         return forecasts.to_vec();
     }
@@ -471,7 +486,14 @@ fn filter_by_score(forecasts: &[(ForecastOutput, f64)]) -> Vec<(ForecastOutput, 
         .map(|(_, s)| *s)
         .fold(f64::INFINITY, f64::min);
 
-    let threshold = (best_score * 3.0).max(2.0);
+    // Adjust multiplier based on volatility
+    let multiplier = match volatility {
+        Some(v) if v > 0.3 => 5.0,  // High volatility: more lenient
+        Some(v) if v < 0.05 => 2.0, // Low volatility: stricter
+        _ => 3.0,                   // Default
+    };
+
+    let threshold = (best_score * multiplier).max(2.0);
 
     let filtered: Vec<_> = forecasts
         .iter()
