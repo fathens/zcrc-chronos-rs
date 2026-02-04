@@ -385,7 +385,7 @@ fn create_model(
             let periods = season_period.map(|p| vec![p]);
             Some(Box::new(MstlEtsModel::new(periods)))
         }
-        "NPTS" => Some(Box::new(NptsModel::default())),
+        "NPTS" => Some(Box::new(NptsModel::with_season_period(None, season_period))),
         // Models not yet implemented return None
         _ => {
             debug!(model = name, "Model not implemented in Rust, skipping");

@@ -17,11 +17,20 @@ const PARALLEL_THRESHOLD: usize = 1000;
 pub struct NptsModel {
     /// User-specified K value. If None, K is determined adaptively based on data size.
     k: Option<usize>,
+    /// Detected seasonal period. Used to set context length to 1-2 seasonal cycles.
+    season_period: Option<usize>,
 }
 
 impl NptsModel {
     pub fn new(k: Option<usize>) -> Self {
-        Self { k }
+        Self {
+            k,
+            season_period: None,
+        }
+    }
+
+    pub fn with_season_period(k: Option<usize>, season_period: Option<usize>) -> Self {
+        Self { k, season_period }
     }
 
     /// Compute adaptive K based on candidate count.
@@ -32,6 +41,23 @@ impl NptsModel {
         }
         let k = (candidate_count as f64).sqrt().round() as usize;
         k.clamp(3, 15)
+    }
+
+    /// Compute context length for query pattern matching.
+    /// If season_period is set, use 1-2 seasonal cycles.
+    /// Otherwise, fall back to min(horizon, n/2).
+    fn context_len(&self, n: usize, horizon: usize) -> usize {
+        if let Some(period) = self.season_period {
+            // Use 1-2 seasonal cycles, but cap at n/2
+            let seasonal_context = if period * 2 <= n / 2 {
+                period * 2
+            } else {
+                period
+            };
+            seasonal_context.min(n / 2).max(1)
+        } else {
+            horizon.min(n / 2).max(1)
+        }
     }
 }
 
@@ -62,7 +88,7 @@ impl ForecastModel for NptsModel {
         let normalized = scaler.fit_transform(values)?;
 
         // Use the last `context_len` values as the query pattern
-        let context_len = horizon.min(n / 2).max(1);
+        let context_len = self.context_len(n, horizon);
         let query = &normalized[n - context_len..];
 
         debug!(
