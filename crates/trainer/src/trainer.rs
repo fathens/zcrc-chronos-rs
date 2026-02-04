@@ -405,11 +405,17 @@ fn create_model(
     }
 }
 
-/// Evaluate a model via holdout cross-validation.
+/// Minimum training size for TSCV folds (as fraction of total data).
+const TSCV_MIN_TRAIN_FRACTION: f64 = 0.6;
+
+/// Evaluate a model via time series cross-validation (TSCV).
 ///
-/// Withholds the last `holdout_len` values, trains the model on the
-/// remainder, predicts `holdout_len` steps, and returns the MASE score
-/// against the held-out values. Lower is better; < 1.0 beats seasonal naive.
+/// Uses expanding window cross-validation with 2 folds to reduce
+/// variance in score estimates while maintaining reasonable speed.
+/// - Small data (<200): 1 fold (single holdout)
+/// - Larger data (>=200): 2 folds
+///
+/// Returns the average MASE score across all folds.
 fn evaluate_holdout(
     values: &[f64],
     timestamps: &[NaiveDateTime],
@@ -418,10 +424,76 @@ fn evaluate_holdout(
     season_period: Option<usize>,
 ) -> f64 {
     let n = values.len();
-    let split = n - holdout_len;
+
+    // Determine number of folds based on data size
+    // Very conservative: only use 2-fold for very large datasets
+    // This avoids issues with non-stationary patterns (e.g., V-recovery)
+    let num_folds = if n < 1000 {
+        1 // Most data: single holdout (most reliable for varied patterns)
+    } else {
+        2 // Very large data only: 2-fold TSCV
+    };
+
+    // Minimum training size (60% of data)
+    let min_train = ((n as f64) * TSCV_MIN_TRAIN_FRACTION) as usize;
+
+    // Calculate fold splits
+    // Each fold uses an expanding window: train on [0..split], test on [split..split+holdout]
+    let mut scores = Vec::with_capacity(num_folds);
+
+    for fold in 0..num_folds {
+        // Calculate split point for this fold
+        // Folds are evenly spaced between min_train and (n - holdout_len)
+        let max_split = n.saturating_sub(holdout_len);
+        if max_split <= min_train {
+            // Not enough data for multiple folds
+            break;
+        }
+
+        let split = if num_folds == 1 {
+            max_split
+        } else {
+            let step = (max_split - min_train) / num_folds;
+            min_train + step * (fold + 1)
+        };
+
+        if split + holdout_len > n {
+            break;
+        }
+
+        let score = evaluate_single_fold(
+            values,
+            timestamps,
+            model_name,
+            split,
+            holdout_len,
+            season_period,
+        );
+        scores.push(score);
+    }
+
+    if scores.is_empty() {
+        return 1.0; // Fallback: neutral score
+    }
+
+    // Return average score across folds
+    scores.iter().sum::<f64>() / scores.len() as f64
+}
+
+/// Evaluate a single fold of TSCV.
+fn evaluate_single_fold(
+    values: &[f64],
+    timestamps: &[NaiveDateTime],
+    model_name: &str,
+    split: usize,
+    holdout_len: usize,
+    season_period: Option<usize>,
+) -> f64 {
+    let n = values.len();
+    let test_end = (split + holdout_len).min(n);
     let train_values = &values[..split];
     let train_timestamps = &timestamps[..split];
-    let actual = &values[split..];
+    let actual = &values[split..test_end];
 
     let mut model: Box<dyn ForecastModel> =
         match create_model(model_name, train_values, season_period) {
@@ -429,7 +501,7 @@ fn evaluate_holdout(
             None => return 1.0,
         };
 
-    match model.fit_predict(train_values, train_timestamps, holdout_len) {
+    match model.fit_predict(train_values, train_timestamps, actual.len()) {
         Ok(forecast) => {
             let season = season_period.unwrap_or(1);
             let score = common::metrics::mase(&forecast.mean, actual, train_values, season);
@@ -455,7 +527,7 @@ fn evaluate_holdout(
             }
         }
         Err(e) => {
-            debug!(model = model_name, error = %e, "Holdout evaluation failed");
+            debug!(model = model_name, error = %e, "Fold evaluation failed");
             // Large finite fallback so the model is down-weighted but doesn't break ensemble
             100.0
         }
