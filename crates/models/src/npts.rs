@@ -13,19 +13,25 @@ const PARALLEL_THRESHOLD: usize = 1000;
 ///
 /// K-nearest-neighbor forecasting: finds similar subsequences in history
 /// and uses their subsequent values as forecasts. Weights by distance.
+#[derive(Default)]
 pub struct NptsModel {
-    k: usize,
+    /// User-specified K value. If None, K is determined adaptively based on data size.
+    k: Option<usize>,
 }
 
 impl NptsModel {
     pub fn new(k: Option<usize>) -> Self {
-        Self { k: k.unwrap_or(5) }
+        Self { k }
     }
-}
 
-impl Default for NptsModel {
-    fn default() -> Self {
-        Self::new(None)
+    /// Compute adaptive K based on candidate count.
+    /// Uses sqrt(candidates) as baseline, clamped to [3, 15].
+    fn adaptive_k(&self, candidate_count: usize) -> usize {
+        if let Some(k) = self.k {
+            return k;
+        }
+        let k = (candidate_count as f64).sqrt().round() as usize;
+        k.clamp(3, 15)
     }
 }
 
@@ -60,7 +66,7 @@ impl ForecastModel for NptsModel {
         let query = &normalized[n - context_len..];
 
         debug!(
-            k = self.k,
+            k = ?self.k,
             context_len = context_len,
             horizon = horizon,
             "NPTS forecasting"
@@ -103,7 +109,7 @@ impl ForecastModel for NptsModel {
         };
 
         // Partial sort: only need top K (O(n) vs O(n log n) for full sort)
-        let k = self.k.min(candidates.len());
+        let k = self.adaptive_k(candidate_count).min(candidates.len());
         if k > 0 && k < candidates.len() {
             candidates.select_nth_unstable_by(k - 1, |a, b| {
                 a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
