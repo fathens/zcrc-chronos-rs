@@ -1,3 +1,3 @@
 mod trainer;
 
-pub use trainer::HierarchicalTrainer;
+pub use trainer::{HierarchicalTrainer, TrainingHints};

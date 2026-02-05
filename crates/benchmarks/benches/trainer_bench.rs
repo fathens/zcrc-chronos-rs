@@ -5,7 +5,7 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use common::ModelSelectionStrategy;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use trainer::HierarchicalTrainer;
+use trainer::{HierarchicalTrainer, TrainingHints};
 
 fn make_timestamps(n: usize) -> Vec<NaiveDateTime> {
     let base = NaiveDate::from_ymd_opt(2024, 1, 1)
@@ -77,7 +77,10 @@ fn bench_train_fast_stage(c: &mut Criterion) {
                         black_box(strat),
                         60.0,
                         *h,
-                        Some(12),
+                        TrainingHints {
+                            season_period: Some(12),
+                            volatility: None,
+                        },
                     )
                 })
             },
@@ -110,7 +113,10 @@ fn bench_train_hierarchically(c: &mut Criterion) {
                         black_box(strat),
                         60.0,
                         *h,
-                        Some(12),
+                        TrainingHints {
+                            season_period: Some(12),
+                            volatility: None,
+                        },
                     )
                 })
             },

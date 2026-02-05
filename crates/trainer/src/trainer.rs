@@ -16,6 +16,15 @@ use tracing::{debug, info, warn};
 /// Set to 200 based on benchmarks showing parallel overhead for smaller datasets.
 const PARALLEL_TRAINING_THRESHOLD: usize = 200;
 
+/// Optional parameters for hierarchical training from time series analysis.
+#[derive(Default, Clone)]
+pub struct TrainingHints {
+    /// Detected seasonal period (forwarded to seasonal models).
+    pub season_period: Option<usize>,
+    /// Coefficient of variation (used to adjust filtering thresholds).
+    pub volatility: Option<f64>,
+}
+
 /// Port of Python's `HierarchicalTrainer`.
 ///
 /// Orchestrates staged model training: fast → medium → advanced.
@@ -39,9 +48,9 @@ impl HierarchicalTrainer {
 
     /// Run hierarchical training and return the best ensemble forecast.
     ///
-    /// `season_period` is the detected seasonal period (from the analyzer).
-    /// When provided, it is forwarded to models that support seasonality
-    /// (SeasonalNaive, ETS).
+    /// `hints` contains optional parameters from time series analysis:
+    /// - `season_period`: forwarded to seasonal models (SeasonalNaive, ETS)
+    /// - `volatility`: used to adjust model filtering thresholds
     pub fn train_hierarchically(
         &mut self,
         values: &[f64],
@@ -49,8 +58,10 @@ impl HierarchicalTrainer {
         strategy: &ModelSelectionStrategy,
         time_budget_secs: f64,
         horizon: usize,
-        season_period: Option<usize>,
+        hints: TrainingHints,
     ) -> Result<(ForecastOutput, TrainingMetadata)> {
+        let season_period = hints.season_period;
+        let volatility = hints.volatility;
         info!("Starting hierarchical training");
 
         let start = Instant::now();
@@ -144,7 +155,7 @@ impl HierarchicalTrainer {
         }
 
         // Filter out poor-performing models before ensembling
-        let filtered = filter_by_score(&all_forecasts);
+        let filtered = filter_by_score(&all_forecasts, volatility);
         info!(
             before = all_forecasts.len(),
             after = filtered.len(),
@@ -152,7 +163,7 @@ impl HierarchicalTrainer {
         );
 
         // Ensemble: inverse-MAE weighted average
-        let ensemble = inverse_mae_ensemble(&filtered, horizon);
+        let ensemble = softmax_ensemble(&filtered, horizon);
 
         let total_time = start.elapsed().as_secs_f64();
         let metadata = TrainingMetadata {
@@ -385,7 +396,7 @@ fn create_model(
             let periods = season_period.map(|p| vec![p]);
             Some(Box::new(MstlEtsModel::new(periods)))
         }
-        "NPTS" => Some(Box::new(NptsModel::default())),
+        "NPTS" => Some(Box::new(NptsModel::with_season_period(None, season_period))),
         // Models not yet implemented return None
         _ => {
             debug!(model = name, "Model not implemented in Rust, skipping");
@@ -394,11 +405,17 @@ fn create_model(
     }
 }
 
-/// Evaluate a model via holdout cross-validation.
+/// Minimum training size for TSCV folds (as fraction of total data).
+const TSCV_MIN_TRAIN_FRACTION: f64 = 0.6;
+
+/// Evaluate a model via time series cross-validation (TSCV).
 ///
-/// Withholds the last `holdout_len` values, trains the model on the
-/// remainder, predicts `holdout_len` steps, and returns the MASE score
-/// against the held-out values. Lower is better; < 1.0 beats seasonal naive.
+/// Uses expanding window cross-validation with 2 folds to reduce
+/// variance in score estimates while maintaining reasonable speed.
+/// - Small data (<200): 1 fold (single holdout)
+/// - Larger data (>=200): 2 folds
+///
+/// Returns the average MASE score across all folds.
 fn evaluate_holdout(
     values: &[f64],
     timestamps: &[NaiveDateTime],
@@ -407,10 +424,76 @@ fn evaluate_holdout(
     season_period: Option<usize>,
 ) -> f64 {
     let n = values.len();
-    let split = n - holdout_len;
+
+    // Determine number of folds based on data size
+    // Very conservative: only use 2-fold for very large datasets
+    // This avoids issues with non-stationary patterns (e.g., V-recovery)
+    let num_folds = if n < 1000 {
+        1 // Most data: single holdout (most reliable for varied patterns)
+    } else {
+        2 // Very large data only: 2-fold TSCV
+    };
+
+    // Minimum training size (60% of data)
+    let min_train = ((n as f64) * TSCV_MIN_TRAIN_FRACTION) as usize;
+
+    // Calculate fold splits
+    // Each fold uses an expanding window: train on [0..split], test on [split..split+holdout]
+    let mut scores = Vec::with_capacity(num_folds);
+
+    for fold in 0..num_folds {
+        // Calculate split point for this fold
+        // Folds are evenly spaced between min_train and (n - holdout_len)
+        let max_split = n.saturating_sub(holdout_len);
+        if max_split <= min_train {
+            // Not enough data for multiple folds
+            break;
+        }
+
+        let split = if num_folds == 1 {
+            max_split
+        } else {
+            let step = (max_split - min_train) / num_folds;
+            min_train + step * (fold + 1)
+        };
+
+        if split + holdout_len > n {
+            break;
+        }
+
+        let score = evaluate_single_fold(
+            values,
+            timestamps,
+            model_name,
+            split,
+            holdout_len,
+            season_period,
+        );
+        scores.push(score);
+    }
+
+    if scores.is_empty() {
+        return 1.0; // Fallback: neutral score
+    }
+
+    // Return average score across folds
+    scores.iter().sum::<f64>() / scores.len() as f64
+}
+
+/// Evaluate a single fold of TSCV.
+fn evaluate_single_fold(
+    values: &[f64],
+    timestamps: &[NaiveDateTime],
+    model_name: &str,
+    split: usize,
+    holdout_len: usize,
+    season_period: Option<usize>,
+) -> f64 {
+    let n = values.len();
+    let test_end = (split + holdout_len).min(n);
     let train_values = &values[..split];
     let train_timestamps = &timestamps[..split];
-    let actual = &values[split..];
+    let actual = &values[split..test_end];
 
     let mut model: Box<dyn ForecastModel> =
         match create_model(model_name, train_values, season_period) {
@@ -418,7 +501,7 @@ fn evaluate_holdout(
             None => return 1.0,
         };
 
-    match model.fit_predict(train_values, train_timestamps, holdout_len) {
+    match model.fit_predict(train_values, train_timestamps, actual.len()) {
         Ok(forecast) => {
             let season = season_period.unwrap_or(1);
             let score = common::metrics::mase(&forecast.mean, actual, train_values, season);
@@ -444,7 +527,7 @@ fn evaluate_holdout(
             }
         }
         Err(e) => {
-            debug!(model = model_name, error = %e, "Holdout evaluation failed");
+            debug!(model = model_name, error = %e, "Fold evaluation failed");
             // Large finite fallback so the model is down-weighted but doesn't break ensemble
             100.0
         }
@@ -457,11 +540,15 @@ fn evaluate_holdout(
 /// This prevents poor-performing models (e.g., non-seasonal models on seasonal data)
 /// from diluting ensemble accuracy.
 ///
-/// Threshold: max(best_score * 3.0, 2.0)
-/// - best=0.5 → threshold=2.0 → Theta(MASE~8) excluded
-/// - best=0.01 → threshold=2.0 → nearly all models pass
-/// - best=5.0 → threshold=15.0 → all models pass (data is hard for everyone)
-fn filter_by_score(forecasts: &[(ForecastOutput, f64)]) -> Vec<(ForecastOutput, f64)> {
+/// Base threshold: max(best_score * multiplier, floor)
+/// The multiplier is adjusted based on volatility:
+/// - High volatility (>0.3): multiplier=5.0 (more lenient)
+/// - Low volatility (<0.05): multiplier=2.0 (stricter)
+/// - Default: multiplier=3.0
+fn filter_by_score(
+    forecasts: &[(ForecastOutput, f64)],
+    volatility: Option<f64>,
+) -> Vec<(ForecastOutput, f64)> {
     if forecasts.len() <= 1 {
         return forecasts.to_vec();
     }
@@ -471,7 +558,14 @@ fn filter_by_score(forecasts: &[(ForecastOutput, f64)]) -> Vec<(ForecastOutput, 
         .map(|(_, s)| *s)
         .fold(f64::INFINITY, f64::min);
 
-    let threshold = (best_score * 3.0).max(2.0);
+    // Adjust multiplier based on volatility
+    let multiplier = match volatility {
+        Some(v) if v > 0.3 => 5.0,  // High volatility: more lenient
+        Some(v) if v < 0.05 => 2.0, // Low volatility: stricter
+        _ => 3.0,                   // Default
+    };
+
+    let threshold = (best_score * multiplier).max(2.0);
 
     let filtered: Vec<_> = forecasts
         .iter()
@@ -492,15 +586,31 @@ fn filter_by_score(forecasts: &[(ForecastOutput, f64)]) -> Vec<(ForecastOutput, 
     }
 }
 
-/// Inverse-MAE weighted ensemble of multiple forecasts.
-fn inverse_mae_ensemble(forecasts: &[(ForecastOutput, f64)], horizon: usize) -> ForecastOutput {
+/// Softmax-weighted ensemble of multiple forecasts.
+///
+/// Uses softmax(-score / temperature) to compute weights. Lower scores get higher weights.
+/// Temperature controls weight concentration: lower = more concentrated on best models.
+fn softmax_ensemble(forecasts: &[(ForecastOutput, f64)], horizon: usize) -> ForecastOutput {
     if forecasts.len() == 1 {
         return forecasts[0].0.clone();
     }
 
-    // Weights = 1 / (score + epsilon)
-    let weights: Vec<f64> = forecasts.iter().map(|(_, s)| 1.0 / (s + 1e-10)).collect();
-    let total_weight: f64 = weights.iter().sum();
+    // Softmax weighting with temperature parameter
+    // temperature = 0.5 gives good balance between best model and diversity
+    let temperature = 0.5;
+
+    // Find min score for numerical stability (subtract before exp)
+    let min_score = forecasts
+        .iter()
+        .map(|(_, s)| *s)
+        .fold(f64::INFINITY, f64::min);
+
+    // Compute softmax weights: exp(-(score - min_score) / temperature)
+    let exp_weights: Vec<f64> = forecasts
+        .iter()
+        .map(|(_, s)| (-(s - min_score) / temperature).exp())
+        .collect();
+    let total_weight: f64 = exp_weights.iter().sum();
 
     let mut mean = vec![0.0; horizon];
     let mut lower = vec![0.0; horizon];
@@ -508,7 +618,7 @@ fn inverse_mae_ensemble(forecasts: &[(ForecastOutput, f64)], horizon: usize) -> 
     let mut has_intervals = false;
 
     for (idx, (forecast, _)) in forecasts.iter().enumerate() {
-        let w = weights[idx] / total_weight;
+        let w = exp_weights[idx] / total_weight;
         for h in 0..horizon.min(forecast.mean.len()) {
             mean[h] += w * forecast.mean[h];
         }

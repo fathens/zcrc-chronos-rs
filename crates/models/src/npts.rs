@@ -13,19 +13,51 @@ const PARALLEL_THRESHOLD: usize = 1000;
 ///
 /// K-nearest-neighbor forecasting: finds similar subsequences in history
 /// and uses their subsequent values as forecasts. Weights by distance.
+#[derive(Default)]
 pub struct NptsModel {
-    k: usize,
+    /// User-specified K value. If None, K is determined adaptively based on data size.
+    k: Option<usize>,
+    /// Detected seasonal period. Used to set context length to 1-2 seasonal cycles.
+    season_period: Option<usize>,
 }
 
 impl NptsModel {
     pub fn new(k: Option<usize>) -> Self {
-        Self { k: k.unwrap_or(5) }
+        Self {
+            k,
+            season_period: None,
+        }
     }
-}
 
-impl Default for NptsModel {
-    fn default() -> Self {
-        Self::new(None)
+    pub fn with_season_period(k: Option<usize>, season_period: Option<usize>) -> Self {
+        Self { k, season_period }
+    }
+
+    /// Compute adaptive K based on candidate count.
+    /// Uses sqrt(candidates) as baseline, clamped to [3, 15].
+    fn adaptive_k(&self, candidate_count: usize) -> usize {
+        if let Some(k) = self.k {
+            return k;
+        }
+        let k = (candidate_count as f64).sqrt().round() as usize;
+        k.clamp(3, 15)
+    }
+
+    /// Compute context length for query pattern matching.
+    /// If season_period is set, use 1-2 seasonal cycles.
+    /// Otherwise, fall back to min(horizon, n/2).
+    fn context_len(&self, n: usize, horizon: usize) -> usize {
+        if let Some(period) = self.season_period {
+            // Use 1-2 seasonal cycles, but cap at n/2
+            let seasonal_context = if period * 2 <= n / 2 {
+                period * 2
+            } else {
+                period
+            };
+            seasonal_context.min(n / 2).max(1)
+        } else {
+            horizon.min(n / 2).max(1)
+        }
     }
 }
 
@@ -56,11 +88,11 @@ impl ForecastModel for NptsModel {
         let normalized = scaler.fit_transform(values)?;
 
         // Use the last `context_len` values as the query pattern
-        let context_len = horizon.min(n / 2).max(1);
+        let context_len = self.context_len(n, horizon);
         let query = &normalized[n - context_len..];
 
         debug!(
-            k = self.k,
+            k = ?self.k,
             context_len = context_len,
             horizon = horizon,
             "NPTS forecasting"
@@ -103,7 +135,7 @@ impl ForecastModel for NptsModel {
         };
 
         // Partial sort: only need top K (O(n) vs O(n log n) for full sort)
-        let k = self.k.min(candidates.len());
+        let k = self.adaptive_k(candidate_count).min(candidates.len());
         if k > 0 && k < candidates.len() {
             candidates.select_nth_unstable_by(k - 1, |a, b| {
                 a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)

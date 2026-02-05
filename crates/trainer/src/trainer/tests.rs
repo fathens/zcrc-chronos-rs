@@ -34,7 +34,7 @@ fn test_hierarchical_basic() {
     let strategy = make_strategy();
 
     let (forecast, metadata) = trainer
-        .train_hierarchically(&values, &ts, &strategy, 60.0, 5, None)
+        .train_hierarchically(&values, &ts, &strategy, 60.0, 5, TrainingHints::default())
         .unwrap();
 
     assert_eq!(forecast.mean.len(), 5);
@@ -50,7 +50,7 @@ fn test_hierarchical_constant_data() {
     let strategy = make_strategy();
 
     let (forecast, _) = trainer
-        .train_hierarchically(&values, &ts, &strategy, 30.0, 3, None)
+        .train_hierarchically(&values, &ts, &strategy, 30.0, 3, TrainingHints::default())
         .unwrap();
 
     assert_eq!(forecast.mean.len(), 3);
@@ -61,7 +61,7 @@ fn test_hierarchical_constant_data() {
 }
 
 #[test]
-fn test_inverse_mae_ensemble() {
+fn test_softmax_ensemble() {
     let f1 = ForecastOutput {
         mean: vec![10.0, 20.0],
         lower_quantile: None,
@@ -76,7 +76,7 @@ fn test_inverse_mae_ensemble() {
     };
 
     // Equal scores → equal weights → simple average
-    let ensemble = inverse_mae_ensemble(&[(f1, 0.5), (f2, 0.5)], 2);
+    let ensemble = softmax_ensemble(&[(f1, 0.5), (f2, 0.5)], 2);
     assert_eq!(ensemble.mean.len(), 2);
     // With equal weights: (10+30)/2=20, (20+40)/2=30
     assert!((ensemble.mean[0] - 20.0).abs() < 0.01);
@@ -84,7 +84,7 @@ fn test_inverse_mae_ensemble() {
 }
 
 #[test]
-fn test_inverse_mae_ensemble_weighted() {
+fn test_softmax_ensemble_weighted() {
     let f1 = ForecastOutput {
         mean: vec![100.0],
         lower_quantile: None,
@@ -98,11 +98,12 @@ fn test_inverse_mae_ensemble_weighted() {
         model_name: "Bad".into(),
     };
 
-    // f1 has much better score (0.01) vs f2 (1.0) → f1 dominates
-    let ensemble = inverse_mae_ensemble(&[(f1, 0.01), (f2, 1.0)], 1);
-    // f1 weight: 1/0.01 = 100, f2 weight: 1/1.0 = 1 → f1 dominates
+    // f1 has much better score (0.01) vs f2 (1.0) → f1 dominates with softmax
+    let ensemble = softmax_ensemble(&[(f1, 0.01), (f2, 1.0)], 1);
+    // With temperature=0.5, score diff of 0.99 → exp(-0.99/0.5) ≈ 0.14 weight for f2
+    // f1 dominates heavily
     assert!(
-        ensemble.mean[0] < 110.0,
+        ensemble.mean[0] < 120.0,
         "Expected ~100, got {}",
         ensemble.mean[0]
     );
@@ -142,7 +143,7 @@ fn make_forecast(name: &str) -> ForecastOutput {
 fn test_filter_by_score_removes_outliers() {
     // best=0.5, threshold=max(0.5*3, 2.0)=2.0 → score=8.0 excluded
     let forecasts = vec![(make_forecast("Good"), 0.5), (make_forecast("Bad"), 8.0)];
-    let filtered = filter_by_score(&forecasts);
+    let filtered = filter_by_score(&forecasts, None);
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].0.model_name, "Good");
 }
@@ -155,7 +156,7 @@ fn test_filter_by_score_keeps_all_when_similar() {
         (make_forecast("B"), 1.0),
         (make_forecast("C"), 1.2),
     ];
-    let filtered = filter_by_score(&forecasts);
+    let filtered = filter_by_score(&forecasts, None);
     assert_eq!(filtered.len(), 3);
 }
 
@@ -169,7 +170,7 @@ fn test_filter_by_score_fallback_single() {
         (make_forecast("Worse1"), 5.0),
         (make_forecast("Worse2"), 10.0),
     ];
-    let filtered = filter_by_score(&forecasts);
+    let filtered = filter_by_score(&forecasts, None);
     // threshold = max(0.1*3, 2.0) = 2.0
     // Best(0.1) passes, Worse1(5.0) and Worse2(10.0) filtered out
     assert_eq!(filtered.len(), 1);
@@ -179,14 +180,14 @@ fn test_filter_by_score_fallback_single() {
 #[test]
 fn test_filter_by_score_single_model() {
     let forecasts = vec![(make_forecast("Only"), 5.0)];
-    let filtered = filter_by_score(&forecasts);
+    let filtered = filter_by_score(&forecasts, None);
     assert_eq!(filtered.len(), 1);
 }
 
 #[test]
 fn test_filter_by_score_empty() {
     let forecasts: Vec<(ForecastOutput, f64)> = vec![];
-    let filtered = filter_by_score(&forecasts);
+    let filtered = filter_by_score(&forecasts, None);
     assert!(filtered.is_empty());
 }
 
@@ -199,7 +200,7 @@ fn test_filter_by_score_high_best_keeps_all() {
         (make_forecast("B"), 8.0),
         (make_forecast("C"), 12.0),
     ];
-    let filtered = filter_by_score(&forecasts);
+    let filtered = filter_by_score(&forecasts, None);
     assert_eq!(filtered.len(), 3);
 }
 
