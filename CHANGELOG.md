@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-02-05
+
+### Added
+
+- Criterion benchmark infrastructure (bench)
+
+### Changed
+
+- Improve prediction accuracy with cross-validation, dynamic filtering, and softmax-weighted ensemble (trainer)
+- Adaptive context length and K selection based on data characteristics (npts)
+- Performance optimizations: parallelization, partial sort, vector pre-allocation
+
 ## [0.1.4] - 2026-02-01
 
 ### Added
@@ -63,7 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BigDecimal support for external API boundaries
 - FFT-based seasonality detection
 
-[Unreleased]: https://github.com/user/zcrc-chronos-rs/compare/0.1.4...HEAD
+[Unreleased]: https://github.com/user/zcrc-chronos-rs/compare/0.1.5...HEAD
+[0.1.5]: https://github.com/user/zcrc-chronos-rs/compare/0.1.4...0.1.5
 [0.1.4]: https://github.com/user/zcrc-chronos-rs/compare/0.1.3...0.1.4
 [0.1.3]: https://github.com/user/zcrc-chronos-rs/compare/0.1.2...0.1.3
 [0.1.2]: https://github.com/user/zcrc-chronos-rs/compare/0.1.1...0.1.2
