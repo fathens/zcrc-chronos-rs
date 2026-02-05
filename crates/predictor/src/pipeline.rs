@@ -49,8 +49,8 @@ fn calculate_median_interval(timestamps: &[NaiveDateTime]) -> i64 {
         .windows(2)
         .map(|w| (w[1] - w[0]).num_seconds())
         .collect();
-    intervals.sort();
-    intervals[intervals.len() / 2].max(1)
+    let mid = intervals.len() / 2;
+    (*intervals.select_nth_unstable(mid).1).max(1)
 }
 
 /// Convert TimeDelta to steps based on median sampling interval.
@@ -170,13 +170,17 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
 
     // Step 4: Hierarchical training + ensemble (with detected season period)
     let mut trainer = HierarchicalTrainer::default();
+    let hints = trainer::TrainingHints {
+        season_period,
+        volatility: Some(characteristics.volatility),
+    };
     let (forecast, metadata) = trainer.train_hierarchically(
         &train_values,
         &norm_timestamps,
         &strategy,
         time_budget,
         horizon_steps,
-        season_period,
+        hints,
     )?;
 
     // Step 5: Inverse transform if log was applied

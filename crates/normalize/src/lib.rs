@@ -259,13 +259,26 @@ fn median(data: &[f64]) -> f64 {
     if data.is_empty() {
         return 0.0;
     }
-    let mut sorted = data.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let mid = sorted.len() / 2;
-    if sorted.len().is_multiple_of(2) {
-        (sorted[mid - 1] + sorted[mid]) / 2.0
+    let mut buf = data.to_vec();
+    let n = buf.len();
+    let mid = n / 2;
+    // Use quickselect (O(n) average) instead of full sort (O(n log n))
+    buf.select_nth_unstable_by(mid, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if n.is_multiple_of(2) {
+        // For even length, need both mid-1 and mid elements
+        // After first select, buf[mid] is the upper-middle element
+        let val_mid = buf[mid];
+        // Find max of elements in 0..mid to get the lower-middle element
+        let val_lower = buf[..mid]
+            .iter()
+            .copied()
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(val_mid);
+        (val_lower + val_mid) / 2.0
     } else {
-        sorted[mid]
+        buf[mid]
     }
 }
 

@@ -7,34 +7,32 @@ use crate::{ChronosError, Result};
 ///
 /// Returns `InvalidInput` if any value cannot be represented as f64.
 pub fn decimals_to_f64s(values: &[BigDecimal]) -> Result<Vec<f64>> {
-    values
-        .iter()
-        .enumerate()
-        .map(|(i, d)| {
-            d.to_f64().ok_or_else(|| {
-                ChronosError::InvalidInput(format!(
-                    "Cannot convert BigDecimal to f64 at index {i}: {d}"
-                ))
-            })
-        })
-        .collect()
+    let mut result = Vec::with_capacity(values.len());
+    for (i, d) in values.iter().enumerate() {
+        let v = d.to_f64().ok_or_else(|| {
+            ChronosError::InvalidInput(format!(
+                "Cannot convert BigDecimal to f64 at index {i}: {d}"
+            ))
+        })?;
+        result.push(v);
+    }
+    Ok(result)
 }
 
 /// Convert a slice of `f64` values to `Vec<BigDecimal>`.
 ///
 /// Returns `InvalidInput` if any value is NaN or Infinity.
 pub fn f64s_to_decimals(values: &[f64]) -> Result<Vec<BigDecimal>> {
-    values
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| {
-            BigDecimal::from_f64(v).ok_or_else(|| {
-                ChronosError::InvalidInput(format!(
-                    "Cannot convert f64 to BigDecimal at index {i}: {v}"
-                ))
-            })
-        })
-        .collect()
+    let mut result = Vec::with_capacity(values.len());
+    for (i, &v) in values.iter().enumerate() {
+        let d = BigDecimal::from_f64(v).ok_or_else(|| {
+            ChronosError::InvalidInput(format!(
+                "Cannot convert f64 to BigDecimal at index {i}: {v}"
+            ))
+        })?;
+        result.push(d);
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
