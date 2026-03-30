@@ -12,7 +12,6 @@ models = { workspace = true }
 trainer = { workspace = true }
 chrono = { workspace = true }
 bigdecimal = { workspace = true }
-libc = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,6 +19,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+libc = { workspace = true }
 approx = { workspace = true }
 num-traits = { workspace = true }
 chrono = { workspace = true }

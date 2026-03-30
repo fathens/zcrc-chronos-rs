@@ -122,7 +122,7 @@ fn run_concurrent_test(
             let count = if t < num_threads - 1 {
                 work_per_thread
             } else {
-                total_predictions - work_per_thread * t
+                total_predictions.saturating_sub(work_per_thread * t)
             };
             std::thread::spawn(move || {
                 let mut ok = 0usize;

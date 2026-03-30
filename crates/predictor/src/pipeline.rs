@@ -57,6 +57,11 @@ impl Predictor {
     /// augurs model buffer (~200 MB). Recommended: 3 for balance of speed
     /// and memory (~856 MiB total, ~2 min for 80 tokens).
     pub fn new(max_model_threads: usize) -> Result<Self> {
+        if max_model_threads == 0 {
+            return Err(ChronosError::InvalidInput(
+                "max_model_threads must be > 0".into(),
+            ));
+        }
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(max_model_threads)
             .build()
@@ -103,7 +108,7 @@ impl Predictor {
         info!(
             data_points = input.data.len(),
             horizon = %input.horizon,
-            time_budget = format!("{:.0}s", time_budget),
+            time_budget_secs = time_budget,
             "Starting prediction pipeline"
         );
 
@@ -118,9 +123,14 @@ impl Predictor {
 
         // Step 2.5: Apply log transform if exponential trend detected
         let (train_values, log_transformed) = if is_exponential {
-            info!("Exponential trend detected, applying log transform");
-            let log_vals: Vec<f64> = norm_values.iter().map(|v| v.ln()).collect();
-            (log_vals, true)
+            if norm_values.iter().all(|&v| v > 0.0) {
+                info!("Exponential trend detected, applying log transform");
+                let log_vals: Vec<f64> = norm_values.iter().map(|v| v.ln()).collect();
+                (log_vals, true)
+            } else {
+                info!("Exponential trend detected but data contains non-positive values, skipping log transform");
+                (norm_values.clone(), false)
+            }
         } else {
             (norm_values.clone(), false)
         };
@@ -170,8 +180,11 @@ impl Predictor {
         // --- Phase 3: Post-training (calling thread) ---
 
         // Step 5: Inverse transform if log was applied
+        // Clamp before exp() to prevent f64::INFINITY (exp(709.78) ≈ f64::MAX)
+        let safe_exp = |v: &f64| -> f64 { v.min(709.0).exp() };
+
         let final_mean: Vec<f64> = if log_transformed {
-            forecast.mean.iter().map(|v| v.exp()).collect()
+            forecast.mean.iter().map(safe_exp).collect()
         } else {
             forecast.mean
         };
@@ -179,7 +192,7 @@ impl Predictor {
         let final_lower: Option<Vec<f64>> = if log_transformed {
             forecast
                 .lower_quantile
-                .map(|v| v.iter().map(|x| x.exp()).collect())
+                .map(|v| v.iter().map(safe_exp).collect())
         } else {
             forecast.lower_quantile
         };
@@ -187,7 +200,7 @@ impl Predictor {
         let final_upper: Option<Vec<f64>> = if log_transformed {
             forecast
                 .upper_quantile
-                .map(|v| v.iter().map(|x| x.exp()).collect())
+                .map(|v| v.iter().map(safe_exp).collect())
         } else {
             forecast.upper_quantile
         };
@@ -198,7 +211,7 @@ impl Predictor {
             strategy = %strategy_name,
             models = metadata.model_count,
             log_transformed = log_transformed,
-            time = format!("{:.2}s", processing_time),
+            time_secs = processing_time,
             "Prediction pipeline complete"
         );
 
@@ -312,9 +325,11 @@ fn calculate_time_budget(data_len: usize) -> f64 {
 /// Uses a default single-threaded pool. For controlled parallelism,
 /// use [`Predictor::new`] with a specific thread count.
 pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
-    static DEFAULT: LazyLock<Predictor> =
-        LazyLock::new(|| Predictor::new(1).expect("Failed to create default predictor"));
-    DEFAULT.predict(input)
+    static DEFAULT: LazyLock<Result<Predictor>> = LazyLock::new(|| Predictor::new(1));
+    let predictor = DEFAULT
+        .as_ref()
+        .map_err(|e| ChronosError::ModelError(e.to_string()))?;
+    predictor.predict(input)
 }
 
 #[cfg(test)]
