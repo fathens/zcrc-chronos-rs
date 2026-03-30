@@ -212,7 +212,7 @@ fn test_ensemble_with_filtering_seasonal() {
 
     let period = 12;
     let n = 200; // More data for better ETS fit
-                 // Generate seasonal data with trend (ETS excels at this)
+    // Generate seasonal data with trend (ETS excels at this)
     let values: Vec<f64> = (0..n)
         .map(|i| {
             100.0

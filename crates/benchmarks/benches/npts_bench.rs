@@ -4,7 +4,7 @@
 
 use chrono::{NaiveDate, NaiveDateTime};
 use common::ForecastModel;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use models::NptsModel;
 
 fn make_timestamps(n: usize) -> Vec<NaiveDateTime> {

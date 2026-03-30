@@ -5,7 +5,7 @@
 
 use chrono::{NaiveDate, TimeDelta};
 use common::BigDecimal;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use predictor::{PredictionInput, Predictor};
 use std::str::FromStr;
 

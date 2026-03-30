@@ -3,7 +3,7 @@
 //! Covers: normalize_time_series_data, nearest_resample (via normalization).
 
 use chrono::{NaiveDate, NaiveDateTime};
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use normalize::normalize_time_series_data;
 
 fn make_regular_timestamps(n: usize, interval_secs: i64) -> Vec<NaiveDateTime> {
