@@ -9,6 +9,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Create test input with 15-minute intervals (matching production).
 fn make_input(n: usize) -> PredictionInput {
     let base = NaiveDate::from_ymd_opt(2024, 1, 1)
         .unwrap()
@@ -17,10 +18,10 @@ fn make_input(n: usize) -> PredictionInput {
 
     let data = (0..n)
         .map(|i| {
-            let ts = base + chrono::Duration::hours(i as i64);
+            let ts = base + chrono::Duration::minutes(15 * i as i64);
             let val = 100.0
                 + 1.5 * i as f64
-                + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin();
+                + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / 96.0).sin();
             let decimal = BigDecimal::from_str(&format!("{val:.6}")).unwrap();
             (ts, decimal)
         })

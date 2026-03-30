@@ -9,7 +9,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use predictor::{PredictionInput, Predictor};
 use std::str::FromStr;
 
-fn make_input(values: Vec<f64>, horizon_hours: i64) -> PredictionInput {
+/// Create benchmark input with 15-minute intervals (matching production).
+fn make_input(values: Vec<f64>) -> PredictionInput {
     let base = NaiveDate::from_ymd_opt(2024, 1, 1)
         .unwrap()
         .and_hms_opt(0, 0, 0)
@@ -19,7 +20,7 @@ fn make_input(values: Vec<f64>, horizon_hours: i64) -> PredictionInput {
         .into_iter()
         .enumerate()
         .map(|(i, v)| {
-            let ts = base + chrono::Duration::hours(i as i64);
+            let ts = base + chrono::Duration::minutes(15 * i as i64);
             let decimal = BigDecimal::from_str(&format!("{v:.6}")).unwrap();
             (ts, decimal)
         })
@@ -27,10 +28,12 @@ fn make_input(values: Vec<f64>, horizon_hours: i64) -> PredictionInput {
 
     PredictionInput {
         data,
-        horizon: TimeDelta::hours(horizon_hours),
+        horizon: TimeDelta::hours(24),
     }
 }
 
+/// Generate trend + seasonal data with period in data points (not hours).
+/// With 15-min intervals, period=96 = 1 day cycle.
 fn generate_trend_seasonal(n: usize, period: usize) -> Vec<f64> {
     (0..n)
         .map(|i| {
@@ -46,9 +49,8 @@ fn bench_predictor_pool_threads(c: &mut Criterion) {
     group.sample_size(10);
 
     for n in [500, 2880] {
-        let values = generate_trend_seasonal(n, 12);
-        let horizon_hours = (n / 10).max(5) as i64;
-        let input = make_input(values, horizon_hours);
+        let values = generate_trend_seasonal(n, 96);
+        let input = make_input(values);
 
         for threads in [1, 2, 3] {
             let predictor = Predictor::new(threads).expect("Failed to create Predictor");
