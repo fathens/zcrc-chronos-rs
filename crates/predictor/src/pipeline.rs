@@ -331,11 +331,15 @@ fn calculate_time_budget(data_len: usize) -> f64 {
 ///
 /// Uses a default single-threaded pool. For controlled parallelism,
 /// use [`Predictor::new`] with a specific thread count.
+///
+/// **Note**: The default `Predictor` is initialized once via `LazyLock`.
+/// If initialization fails (e.g., thread pool creation error), the failure
+/// is permanent for the lifetime of the process.
 pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
     static DEFAULT: LazyLock<Result<Predictor>> = LazyLock::new(|| Predictor::new(1));
     let predictor = DEFAULT
         .as_ref()
-        .map_err(|e| ChronosError::ModelError(e.to_string()))?;
+        .map_err(|e| ChronosError::ModelError(format!("default predictor init failed: {e}")))?;
     predictor.predict(input)
 }
 
