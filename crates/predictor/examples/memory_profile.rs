@@ -16,10 +16,14 @@ use std::time::Instant;
 fn get_rss_bytes() -> u64 {
     use std::mem;
 
-    extern "C" {
+    unsafe extern "C" {
         fn mach_task_self() -> u32;
     }
 
+    // SAFETY: mach_task_self() returns the current task port (always valid).
+    // task_info() is a standard macOS syscall; the info buffer is correctly
+    // sized via MaybeUninit + count calculation. assume_init() is safe
+    // because task_info returns KERN_SUCCESS only after fully writing the struct.
     unsafe {
         let mut info = mem::MaybeUninit::<libc::mach_task_basic_info_data_t>::uninit();
         let mut count = (mem::size_of::<libc::mach_task_basic_info_data_t>()
