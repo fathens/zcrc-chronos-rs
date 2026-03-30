@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-03-30
+
+### Added
+
+- Predictor struct with dedicated rayon ThreadPool for concurrent predictions (predictor)
+- Memory profiling examples for macOS/Linux (bench)
+
+### Changed
+
+- Upgrade Rust toolchain to 1.94.1 and edition to 2024
+- Use array_windows for type-safe slice window access
+- Extract safe_exp to module-level function with improved safety (predictor)
+
+### Fixed
+
+- Preserve NaN propagation in safe_exp to prevent silent data corruption (predictor)
+
 ## [0.1.5] - 2026-02-05
 
 ### Added
@@ -75,7 +92,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BigDecimal support for external API boundaries
 - FFT-based seasonality detection
 
-[Unreleased]: https://github.com/user/zcrc-chronos-rs/compare/0.1.5...HEAD
+[Unreleased]: https://github.com/user/zcrc-chronos-rs/compare/0.1.6...HEAD
+[0.1.6]: https://github.com/user/zcrc-chronos-rs/compare/0.1.5...0.1.6
 [0.1.5]: https://github.com/user/zcrc-chronos-rs/compare/0.1.4...0.1.5
 [0.1.4]: https://github.com/user/zcrc-chronos-rs/compare/0.1.3...0.1.4
 [0.1.3]: https://github.com/user/zcrc-chronos-rs/compare/0.1.2...0.1.3

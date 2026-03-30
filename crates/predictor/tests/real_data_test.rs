@@ -8,7 +8,7 @@
 use chrono::{NaiveDateTime, TimeDelta};
 use common::BigDecimal;
 use num_traits::FromPrimitive;
-use predictor::{predict, PredictionInput};
+use predictor::{PredictionInput, predict};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -323,7 +323,7 @@ fn run_test_with_data(file_data: RealDataFile) -> TestResult {
 /// - $mase_threshold: Maximum allowed MASE (inf values always pass)
 /// - $min_dir_correct: Minimum number of files that must have correct direction
 macro_rules! real_data_test {
-    ($name:ident, $pattern:expr, $mape_threshold:expr, $mase_threshold:expr, $min_dir_correct:expr) => {
+    ($name:ident, $pattern:expr_2021, $mape_threshold:expr_2021, $mase_threshold:expr_2021, $min_dir_correct:expr_2021) => {
         #[test]
         #[ignore]
         fn $name() {
@@ -420,7 +420,7 @@ macro_rules! real_data_test {
 
 /// Macro to generate test functions for patterns in the .tmp subdirectory.
 macro_rules! real_data_tmp_test {
-    ($name:ident, $pattern:expr, $mape_threshold:expr, $mase_threshold:expr, $min_dir_correct:expr) => {
+    ($name:ident, $pattern:expr_2021, $mape_threshold:expr_2021, $mase_threshold:expr_2021, $min_dir_correct:expr_2021) => {
         #[test]
         #[ignore]
         fn $name() {

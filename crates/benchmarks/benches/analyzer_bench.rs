@@ -4,7 +4,7 @@
 
 use analyzer::TimeSeriesAnalyzer;
 use chrono::{NaiveDate, NaiveDateTime};
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
 fn make_timestamps(n: usize) -> Vec<NaiveDateTime> {
     let base = NaiveDate::from_ymd_opt(2024, 1, 1)

@@ -14,8 +14,8 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.5"
-edition = "2021"
+version = "0.1.6"
+edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
@@ -56,6 +56,9 @@ anyhow = "1"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# System
+libc = "0.2"
 
 # Parallelism
 rayon = "1"

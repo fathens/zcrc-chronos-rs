@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 
 use analyzer::TimeSeriesAnalyzer;
 use chrono::{NaiveDateTime, TimeDelta};
-use common::{decimals_to_f64s, f64s_to_decimals, BigDecimal, ChronosError, Result};
+use common::{BigDecimal, ChronosError, Result, decimals_to_f64s, f64s_to_decimals};
 use normalize::normalize_time_series_data;
 use selector::AdaptiveModelSelector;
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,244 @@ pub struct ForecastResult {
     pub model_count: usize,
 }
 
+/// Prediction engine with a dedicated thread pool for model training.
+///
+/// Model training runs on pool threads via `pool.spawn()`, ensuring the calling
+/// thread (e.g., `tokio::spawn_blocking`) does NOT participate in rayon's
+/// work-stealing. This guarantees that the number of concurrent model trainings
+/// equals `pool_threads`, regardless of how many predictions run concurrently.
+pub struct Predictor {
+    pool: rayon::ThreadPool,
+}
+
+impl Predictor {
+    /// Create a new predictor with a dedicated thread pool.
+    ///
+    /// `max_model_threads` controls peak memory: each thread can hold one
+    /// augurs model buffer (~200 MB). Recommended: 3 for balance of speed
+    /// and memory (~856 MiB total, ~2 min for 80 tokens).
+    pub fn new(max_model_threads: usize) -> Result<Self> {
+        if max_model_threads == 0 {
+            return Err(ChronosError::InvalidInput(
+                "max_model_threads must be > 0".into(),
+            ));
+        }
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(max_model_threads)
+            .build()
+            .map_err(|e| ChronosError::ModelError(format!("ThreadPool creation failed: {e}")))?;
+        Ok(Self { pool })
+    }
+
+    /// Run the prediction pipeline.
+    ///
+    /// Pipeline phases:
+    /// 1. Pre-training (calling thread): normalize → analyze → strategy selection
+    /// 2. Training (pool threads): hierarchical model training + ensemble
+    /// 3. Post-training (calling thread): inverse transform → decimal conversion
+    pub fn predict(&self, input: &PredictionInput) -> Result<ForecastResult> {
+        let start = std::time::Instant::now();
+
+        // Validate input
+        if input.data.len() < 2 {
+            return Err(ChronosError::InsufficientData(
+                "At least 2 data points required".into(),
+            ));
+        }
+        if input.horizon <= TimeDelta::zero() {
+            return Err(ChronosError::InvalidInput(
+                "horizon must be positive".into(),
+            ));
+        }
+
+        // --- Phase 1: Pre-training (calling thread) ---
+
+        // Extract sorted data from BTreeMap
+        let (timestamps, decimal_values): (Vec<_>, Vec<_>) = input
+            .data
+            .iter()
+            .map(|(ts, val)| (*ts, val.clone()))
+            .unzip();
+
+        // Convert Decimal → f64 at the boundary (NaN/Inf cannot exist in Decimal)
+        let f64_values = decimals_to_f64s(&decimal_values)?;
+
+        // Auto-calculate time budget based on data size
+        let time_budget = calculate_time_budget(input.data.len());
+
+        info!(
+            data_points = input.data.len(),
+            horizon = %input.horizon,
+            time_budget_secs = time_budget,
+            "Starting prediction pipeline"
+        );
+
+        // Step 1: Normalize
+        let (norm_timestamps, norm_values) = normalize_time_series_data(&timestamps, &f64_values)?;
+
+        // Step 2: Analyze characteristics (run once, share with selector and trainer)
+        let analyzer = TimeSeriesAnalyzer::new();
+        let characteristics = analyzer.analyze(&norm_values, &norm_timestamps);
+        let season_period = characteristics.seasonality.period;
+        let is_exponential = characteristics.trend.is_exponential;
+
+        // Step 2.5: Apply log transform if exponential trend detected
+        let (train_values, log_transformed) = if is_exponential {
+            if norm_values.iter().all(|&v| v > 0.0) {
+                info!("Exponential trend detected, applying log transform");
+                let log_vals: Vec<f64> = norm_values.iter().map(|v| v.ln()).collect();
+                (log_vals, true)
+            } else {
+                info!(
+                    "Exponential trend detected but data contains non-positive values, skipping log transform"
+                );
+                (norm_values.clone(), false)
+            }
+        } else {
+            (norm_values.clone(), false)
+        };
+
+        // Step 3: Select strategy from pre-computed characteristics
+        let selector = AdaptiveModelSelector::default();
+        let strategy = selector.select_strategy_from_characteristics(
+            &characteristics,
+            train_values.len(),
+            time_budget as u64,
+        );
+
+        // Convert horizon from TimeDelta to steps with timestamps
+        let (horizon_steps, forecast_timestamps) =
+            horizon_to_steps_with_timestamps(&input.horizon, &norm_timestamps);
+
+        // Extract strategy_name before moving strategy into the pool closure
+        let strategy_name = strategy.strategy_name.clone();
+
+        // --- Phase 2: Training (pool threads) ---
+        // pool.spawn (not pool.install): ensures the calling thread does NOT
+        // participate in rayon's work-stealing, so concurrent predict() calls
+        // each wait on their own channel without becoming worker threads.
+
+        let hints = trainer::TrainingHints {
+            season_period,
+            volatility: Some(characteristics.volatility),
+        };
+
+        let (forecast, metadata) = {
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+
+            self.pool.spawn(move || {
+                let mut trainer = HierarchicalTrainer::default();
+                let result = trainer.train_hierarchically(
+                    &train_values,
+                    &norm_timestamps,
+                    &strategy,
+                    time_budget,
+                    horizon_steps,
+                    hints,
+                );
+                if tx.send(result).is_err() {
+                    tracing::warn!("prediction result channel closed; caller may have panicked");
+                }
+            });
+
+            rx.recv()
+                .map_err(|_| ChronosError::ModelError("model training thread panicked".into()))?
+        }?;
+
+        // --- Phase 3: Post-training (calling thread) ---
+
+        // Step 5: Inverse transform if log was applied
+        let final_mean: Vec<f64> = if log_transformed {
+            forecast.mean.iter().copied().map(safe_exp).collect()
+        } else {
+            forecast.mean
+        };
+
+        let final_lower: Option<Vec<f64>> = if log_transformed {
+            forecast
+                .lower_quantile
+                .map(|v| v.iter().copied().map(safe_exp).collect())
+        } else {
+            forecast.lower_quantile
+        };
+
+        let final_upper: Option<Vec<f64>> = if log_transformed {
+            forecast
+                .upper_quantile
+                .map(|v| v.iter().copied().map(safe_exp).collect())
+        } else {
+            forecast.upper_quantile
+        };
+
+        let processing_time = start.elapsed().as_secs_f64();
+
+        info!(
+            strategy = %strategy_name,
+            models = metadata.model_count,
+            log_transformed = log_transformed,
+            time_secs = processing_time,
+            "Prediction pipeline complete"
+        );
+
+        // Convert f64 → Decimal and build BTreeMap with timestamps
+        let forecast_decimals = f64s_to_decimals(&final_mean)?;
+        let forecast_values: BTreeMap<NaiveDateTime, BigDecimal> = forecast_timestamps
+            .iter()
+            .zip(forecast_decimals)
+            .map(|(ts, val)| (*ts, val))
+            .collect();
+
+        let lower_bound = final_lower
+            .map(|v| {
+                f64s_to_decimals(&v).map(|decimals| {
+                    forecast_timestamps
+                        .iter()
+                        .zip(decimals.into_iter())
+                        .map(|(ts, val)| (*ts, val))
+                        .collect()
+                })
+            })
+            .transpose()?;
+
+        let upper_bound = final_upper
+            .map(|v| {
+                f64s_to_decimals(&v).map(|decimals| {
+                    forecast_timestamps
+                        .iter()
+                        .zip(decimals.into_iter())
+                        .map(|(ts, val)| (*ts, val))
+                        .collect()
+                })
+            })
+            .transpose()?;
+
+        Ok(ForecastResult {
+            forecast_values,
+            lower_bound,
+            upper_bound,
+            model_name: forecast.model_name,
+            strategy_name,
+            processing_time_secs: processing_time,
+            model_count: metadata.model_count,
+        })
+    }
+}
+
+/// Clamp before exp() to prevent f64::INFINITY.
+/// 709.0 = f64::MAX.ln().floor(); exp(709.78) ≈ f64::MAX, so 709.0 gives a safety margin.
+/// NaN passes through so downstream f64s_to_decimals correctly rejects it.
+fn safe_exp(v: f64) -> f64 {
+    if v.is_nan() {
+        return f64::NAN;
+    }
+    if v > 709.0 {
+        tracing::warn!(value = v, "clamping exp() input to 709.0");
+        709.0_f64.exp()
+    } else {
+        v.exp()
+    }
+}
+
 /// Calculate median sampling interval in seconds.
 fn calculate_median_interval(timestamps: &[NaiveDateTime]) -> i64 {
     if timestamps.len() < 2 {
@@ -46,8 +285,8 @@ fn calculate_median_interval(timestamps: &[NaiveDateTime]) -> i64 {
     }
 
     let mut intervals: Vec<i64> = timestamps
-        .windows(2)
-        .map(|w| (w[1] - w[0]).num_seconds())
+        .array_windows()
+        .map(|[a, b]| (*b - *a).num_seconds())
         .collect();
     let mid = intervals.len() / 2;
     (*intervals.select_nth_unstable(mid).1).max(1)
@@ -63,7 +302,7 @@ fn horizon_to_steps(horizon: &TimeDelta, timestamps: &[NaiveDateTime]) -> usize 
 
     // Convert horizon to steps (ceiling division, minimum 1)
     let horizon_secs = horizon.num_seconds();
-    let steps = ((horizon_secs + median_interval - 1) / median_interval) as usize;
+    let steps = (horizon_secs.saturating_add(median_interval - 1) / median_interval) as usize;
     steps.max(1)
 }
 
@@ -82,11 +321,13 @@ fn horizon_to_steps_with_timestamps(
         return (steps, Vec::new());
     }
 
-    let last_ts = *timestamps.last().unwrap();
+    let last_ts = *timestamps
+        .last()
+        .expect("timestamps verified non-empty above");
     let median_interval = calculate_median_interval(timestamps);
 
     let forecast_timestamps: Vec<NaiveDateTime> = (1..=steps)
-        .map(|i| last_ts + TimeDelta::seconds(median_interval * i as i64))
+        .map(|i| last_ts + TimeDelta::seconds(median_interval.saturating_mul(i as i64)))
         .collect();
 
     (steps, forecast_timestamps)
@@ -100,163 +341,20 @@ fn calculate_time_budget(data_len: usize) -> f64 {
     (base + (data_len as f64 / 100.0) * per_100_points).min(900.0)
 }
 
-/// Main prediction entry point.
+/// Main prediction entry point (backward-compatible free function).
 ///
-/// Pipeline: normalize → analyze → (log transform if exponential) → select strategy → train models → ensemble → (exp transform).
+/// Uses a default single-threaded pool. For controlled parallelism,
+/// use [`Predictor::new`] with a specific thread count.
+///
+/// **Note**: The default `Predictor` is initialized once via `LazyLock`.
+/// If initialization fails (e.g., thread pool creation error), the failure
+/// is permanent for the lifetime of the process.
 pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
-    let start = std::time::Instant::now();
-
-    // Validate input
-    if input.data.len() < 2 {
-        return Err(ChronosError::InsufficientData(
-            "At least 2 data points required".into(),
-        ));
-    }
-    if input.horizon <= TimeDelta::zero() {
-        return Err(ChronosError::InvalidInput(
-            "horizon must be positive".into(),
-        ));
-    }
-
-    // Extract sorted data from BTreeMap
-    let (timestamps, decimal_values): (Vec<_>, Vec<_>) = input
-        .data
-        .iter()
-        .map(|(ts, val)| (*ts, val.clone()))
-        .unzip();
-
-    // Convert Decimal → f64 at the boundary (NaN/Inf cannot exist in Decimal)
-    let f64_values = decimals_to_f64s(&decimal_values)?;
-
-    // Auto-calculate time budget based on data size
-    let time_budget = calculate_time_budget(input.data.len());
-
-    info!(
-        data_points = input.data.len(),
-        horizon = %input.horizon,
-        time_budget = format!("{:.0}s", time_budget),
-        "Starting prediction pipeline"
-    );
-
-    // Step 1: Normalize
-    let (norm_timestamps, norm_values) = normalize_time_series_data(&timestamps, &f64_values)?;
-
-    // Step 2: Analyze characteristics (run once, share with selector and trainer)
-    let analyzer = TimeSeriesAnalyzer::new();
-    let characteristics = analyzer.analyze(&norm_values, &norm_timestamps);
-    let season_period = characteristics.seasonality.period;
-    let is_exponential = characteristics.trend.is_exponential;
-
-    // Step 2.5: Apply log transform if exponential trend detected
-    let (train_values, log_transformed) = if is_exponential {
-        info!("Exponential trend detected, applying log transform");
-        let log_vals: Vec<f64> = norm_values.iter().map(|v| v.ln()).collect();
-        (log_vals, true)
-    } else {
-        (norm_values.clone(), false)
-    };
-
-    // Step 3: Select strategy from pre-computed characteristics
-    let selector = AdaptiveModelSelector::default();
-    let strategy = selector.select_strategy_from_characteristics(
-        &characteristics,
-        train_values.len(),
-        time_budget as u64,
-    );
-
-    // Convert horizon from TimeDelta to steps with timestamps
-    let (horizon_steps, forecast_timestamps) =
-        horizon_to_steps_with_timestamps(&input.horizon, &norm_timestamps);
-
-    // Step 4: Hierarchical training + ensemble (with detected season period)
-    let mut trainer = HierarchicalTrainer::default();
-    let hints = trainer::TrainingHints {
-        season_period,
-        volatility: Some(characteristics.volatility),
-    };
-    let (forecast, metadata) = trainer.train_hierarchically(
-        &train_values,
-        &norm_timestamps,
-        &strategy,
-        time_budget,
-        horizon_steps,
-        hints,
-    )?;
-
-    // Step 5: Inverse transform if log was applied
-    let final_mean: Vec<f64> = if log_transformed {
-        forecast.mean.iter().map(|v| v.exp()).collect()
-    } else {
-        forecast.mean
-    };
-
-    let final_lower: Option<Vec<f64>> = if log_transformed {
-        forecast
-            .lower_quantile
-            .map(|v| v.iter().map(|x| x.exp()).collect())
-    } else {
-        forecast.lower_quantile
-    };
-
-    let final_upper: Option<Vec<f64>> = if log_transformed {
-        forecast
-            .upper_quantile
-            .map(|v| v.iter().map(|x| x.exp()).collect())
-    } else {
-        forecast.upper_quantile
-    };
-
-    let processing_time = start.elapsed().as_secs_f64();
-
-    info!(
-        strategy = %strategy.strategy_name,
-        models = metadata.model_count,
-        log_transformed = log_transformed,
-        time = format!("{:.2}s", processing_time),
-        "Prediction pipeline complete"
-    );
-
-    // Convert f64 → Decimal and build BTreeMap with timestamps
-    let forecast_decimals = f64s_to_decimals(&final_mean)?;
-    let forecast_values: BTreeMap<NaiveDateTime, BigDecimal> = forecast_timestamps
-        .iter()
-        .zip(forecast_decimals)
-        .map(|(ts, val)| (*ts, val))
-        .collect();
-
-    let lower_bound = final_lower
-        .map(|v| {
-            f64s_to_decimals(&v).map(|decimals| {
-                forecast_timestamps
-                    .iter()
-                    .zip(decimals.into_iter())
-                    .map(|(ts, val)| (*ts, val))
-                    .collect()
-            })
-        })
-        .transpose()?;
-
-    let upper_bound = final_upper
-        .map(|v| {
-            f64s_to_decimals(&v).map(|decimals| {
-                forecast_timestamps
-                    .iter()
-                    .zip(decimals.into_iter())
-                    .map(|(ts, val)| (*ts, val))
-                    .collect()
-            })
-        })
-        .transpose()?;
-
-    Ok(ForecastResult {
-        forecast_values,
-        lower_bound,
-        upper_bound,
-        model_name: forecast.model_name,
-        strategy_name: strategy.strategy_name,
-        processing_time_secs: processing_time,
-        model_count: metadata.model_count,
-    })
+    static DEFAULT: LazyLock<Result<Predictor>> = LazyLock::new(|| Predictor::new(1));
+    let predictor = DEFAULT
+        .as_ref()
+        .map_err(|e| ChronosError::ModelError(format!("default predictor init failed: {e}")))?;
+    predictor.predict(input)
 }
 
 #[cfg(test)]

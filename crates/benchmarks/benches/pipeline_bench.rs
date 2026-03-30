@@ -4,8 +4,8 @@
 
 use chrono::{NaiveDate, TimeDelta};
 use common::BigDecimal;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use predictor::{predict, PredictionInput};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use predictor::{PredictionInput, predict};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 

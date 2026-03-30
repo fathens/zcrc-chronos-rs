@@ -1,6 +1,6 @@
 use bigdecimal::BigDecimal;
 use chrono::NaiveDateTime;
-use common::{decimals_to_f64s, f64s_to_decimals, ChronosError, Result};
+use common::{ChronosError, Result, decimals_to_f64s, f64s_to_decimals};
 use tracing::info;
 
 /// Normalize irregular time-series data to uniform intervals while preserving
@@ -47,8 +47,8 @@ pub fn normalize_time_series_data(
 
     // Calculate time deltas in seconds
     let time_diffs: Vec<f64> = timestamps
-        .windows(2)
-        .map(|w| (w[1] - w[0]).num_milliseconds() as f64 / 1000.0)
+        .array_windows()
+        .map(|[a, b]| (*b - *a).num_milliseconds() as f64 / 1000.0)
         .collect();
 
     // Coefficient of variation
@@ -76,7 +76,7 @@ pub fn normalize_time_series_data(
     let outlier_gap_indices: Vec<usize> = time_diffs
         .iter()
         .enumerate()
-        .filter(|(_, &diff)| diff > gap_threshold)
+        .filter(|&(_, &diff)| diff > gap_threshold)
         .map(|(i, _)| i + 1) // index after the gap
         .collect();
 
