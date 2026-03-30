@@ -561,3 +561,91 @@ fn test_forecast_timestamps_exact_first_value() {
         "Last forecast timestamp should match horizon"
     );
 }
+
+// --- Predictor pub API tests ---
+
+#[test]
+fn test_predictor_new_zero_threads_returns_error() {
+    let result = Predictor::new(0);
+    assert!(result.is_err());
+    let err = format!("{}", result.err().unwrap());
+    assert!(
+        err.contains("max_model_threads must be > 0"),
+        "Expected InvalidInput error, got: {err}"
+    );
+}
+
+#[test]
+fn test_predictor_new_and_predict() {
+    let predictor = Predictor::new(1).expect("Failed to create Predictor");
+    let input = PredictionInput {
+        data: make_data(100),
+        horizon: TimeDelta::hours(10),
+    };
+    let result = predictor.predict(&input).unwrap();
+    assert_eq!(result.forecast_values.len(), 10);
+    assert!(result.model_count > 0);
+}
+
+#[test]
+fn test_predictor_predict_insufficient_data() {
+    let predictor = Predictor::new(1).unwrap();
+    let base = NaiveDate::from_ymd_opt(2024, 1, 1)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+    let input = PredictionInput {
+        data: [(base, BigDecimal::from(1))].into_iter().collect(),
+        horizon: TimeDelta::hours(5),
+    };
+    assert!(predictor.predict(&input).is_err());
+}
+
+#[test]
+fn test_predictor_predict_zero_horizon() {
+    let predictor = Predictor::new(1).unwrap();
+    let input = PredictionInput {
+        data: make_data_with_values(&[1.0; 10]),
+        horizon: TimeDelta::zero(),
+    };
+    assert!(predictor.predict(&input).is_err());
+}
+
+// --- safe_exp tests ---
+
+#[test]
+fn test_safe_exp_normal_values() {
+    assert!((safe_exp(0.0) - 1.0).abs() < f64::EPSILON);
+    assert!((safe_exp(1.0) - 1.0_f64.exp()).abs() < f64::EPSILON);
+    assert!((safe_exp(-1.0) - (-1.0_f64).exp()).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_safe_exp_nan_passthrough() {
+    assert!(safe_exp(f64::NAN).is_nan());
+}
+
+#[test]
+fn test_safe_exp_large_value_clamped() {
+    let result = safe_exp(710.0);
+    let expected = 709.0_f64.exp();
+    assert!(
+        (result - expected).abs() < f64::EPSILON,
+        "Expected exp(709.0) = {expected}, got {result}"
+    );
+}
+
+#[test]
+fn test_safe_exp_negative_infinity() {
+    assert_eq!(safe_exp(f64::NEG_INFINITY), 0.0);
+}
+
+#[test]
+fn test_safe_exp_boundary() {
+    let result = safe_exp(709.0);
+    let expected = 709.0_f64.exp();
+    assert!(
+        (result - expected).abs() < f64::EPSILON,
+        "Boundary value 709.0 should not be clamped"
+    );
+}
