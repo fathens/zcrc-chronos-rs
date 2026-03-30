@@ -170,7 +170,9 @@ impl Predictor {
                     horizon_steps,
                     hints,
                 );
-                let _ = tx.send(result);
+                if tx.send(result).is_err() {
+                    tracing::warn!("prediction result channel closed; caller may have panicked");
+                }
             });
 
             rx.recv()
@@ -309,11 +311,13 @@ fn horizon_to_steps_with_timestamps(
         return (steps, Vec::new());
     }
 
-    let last_ts = *timestamps.last().unwrap();
+    let last_ts = *timestamps
+        .last()
+        .expect("timestamps verified non-empty above");
     let median_interval = calculate_median_interval(timestamps);
 
     let forecast_timestamps: Vec<NaiveDateTime> = (1..=steps)
-        .map(|i| last_ts + TimeDelta::seconds(median_interval * i as i64))
+        .map(|i| last_ts + TimeDelta::seconds(median_interval.saturating_mul(i as i64)))
         .collect();
 
     (steps, forecast_timestamps)
