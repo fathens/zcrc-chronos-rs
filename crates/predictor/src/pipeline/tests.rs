@@ -1,4 +1,5 @@
 use super::*;
+use approx::assert_relative_eq;
 use chrono::NaiveDate;
 use num_traits::{FromPrimitive, ToPrimitive};
 
@@ -615,9 +616,9 @@ fn test_predictor_predict_zero_horizon() {
 
 #[test]
 fn test_safe_exp_normal_values() {
-    assert!((safe_exp(0.0) - 1.0).abs() < f64::EPSILON);
-    assert!((safe_exp(1.0) - 1.0_f64.exp()).abs() < f64::EPSILON);
-    assert!((safe_exp(-1.0) - (-1.0_f64).exp()).abs() < f64::EPSILON);
+    assert_relative_eq!(safe_exp(0.0), 1.0);
+    assert_relative_eq!(safe_exp(1.0), 1.0_f64.exp());
+    assert_relative_eq!(safe_exp(-1.0), (-1.0_f64).exp());
 }
 
 #[test]
@@ -627,12 +628,7 @@ fn test_safe_exp_nan_passthrough() {
 
 #[test]
 fn test_safe_exp_large_value_clamped() {
-    let result = safe_exp(710.0);
-    let expected = 709.0_f64.exp();
-    assert!(
-        (result - expected).abs() < f64::EPSILON,
-        "Expected exp(709.0) = {expected}, got {result}"
-    );
+    assert_relative_eq!(safe_exp(710.0), 709.0_f64.exp());
 }
 
 #[test]
@@ -642,10 +638,10 @@ fn test_safe_exp_negative_infinity() {
 
 #[test]
 fn test_safe_exp_boundary() {
-    let result = safe_exp(709.0);
-    let expected = 709.0_f64.exp();
-    assert!(
-        (result - expected).abs() < f64::EPSILON,
-        "Boundary value 709.0 should not be clamped"
-    );
+    assert_relative_eq!(safe_exp(709.0), 709.0_f64.exp());
+}
+
+#[test]
+fn test_safe_exp_positive_infinity_clamped() {
+    assert_relative_eq!(safe_exp(f64::INFINITY), 709.0_f64.exp());
 }
