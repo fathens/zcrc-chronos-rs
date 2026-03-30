@@ -361,8 +361,8 @@ impl TimeSeriesAnalyzer {
 
         // Check for consistent positive curvature (characteristic of exponential growth)
         let second_diffs: Vec<f64> = values
-            .windows(3)
-            .map(|w| (w[2] - w[1]) - (w[1] - w[0]))
+            .array_windows()
+            .map(|&[a, b, c]| (c - b) - (b - a))
             .collect();
         let mean_curvature = second_diffs.iter().sum::<f64>() / second_diffs.len() as f64;
         let positive_curvatures = second_diffs.iter().filter(|&&d| d > 0.0).count();
@@ -473,7 +473,7 @@ impl TimeSeriesAnalyzer {
             return 0.0;
         }
 
-        let diffs: Vec<f64> = values.windows(2).map(|w| w[1] - w[0]).collect();
+        let diffs: Vec<f64> = values.array_windows().map(|&[a, b]| b - a).collect();
         if diffs.is_empty() {
             return 0.0;
         }
@@ -500,8 +500,8 @@ impl TimeSeriesAnalyzer {
         }
 
         let intervals: Vec<f64> = timestamps
-            .windows(2)
-            .map(|w| (w[1] - w[0]).num_milliseconds() as f64 / 1000.0)
+            .array_windows()
+            .map(|[a, b]| (*b - *a).num_milliseconds() as f64 / 1000.0)
             .collect();
 
         if intervals.is_empty() {
@@ -617,8 +617,8 @@ impl TimeSeriesAnalyzer {
         }
 
         let intervals: Vec<f64> = timestamps
-            .windows(2)
-            .map(|w| (w[1] - w[0]).num_milliseconds() as f64 / 1000.0)
+            .array_windows()
+            .map(|[a, b]| (*b - *a).num_milliseconds() as f64 / 1000.0)
             .collect();
 
         if intervals.is_empty() {
@@ -691,8 +691,8 @@ impl TimeSeriesAnalyzer {
         }
 
         let intervals: Vec<f64> = timestamps
-            .windows(2)
-            .map(|w| (w[1] - w[0]).num_milliseconds() as f64 / 1000.0)
+            .array_windows()
+            .map(|[a, b]| (*b - *a).num_milliseconds() as f64 / 1000.0)
             .collect();
 
         let median_interval = median(&intervals);

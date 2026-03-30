@@ -346,8 +346,8 @@ fn test_irregular_no_outlier_gap_still_normalizes() {
 
     // Timestamps should be uniformly distributed
     let intervals: Vec<i64> = out_ts
-        .windows(2)
-        .map(|w| (w[1] - w[0]).num_seconds())
+        .array_windows()
+        .map(|[a, b]| (*b - *a).num_seconds())
         .collect();
     let first_interval = intervals[0];
     for interval in &intervals {

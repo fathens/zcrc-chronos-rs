@@ -47,8 +47,8 @@ pub fn normalize_time_series_data(
 
     // Calculate time deltas in seconds
     let time_diffs: Vec<f64> = timestamps
-        .windows(2)
-        .map(|w| (w[1] - w[0]).num_milliseconds() as f64 / 1000.0)
+        .array_windows()
+        .map(|[a, b]| (*b - *a).num_milliseconds() as f64 / 1000.0)
         .collect();
 
     // Coefficient of variation

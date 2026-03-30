@@ -191,8 +191,8 @@ fn calculate_median_interval(timestamps: &[NaiveDateTime]) -> i64 {
     }
 
     let mut intervals: Vec<i64> = timestamps
-        .windows(2)
-        .map(|w| (w[1] - w[0]).num_seconds())
+        .array_windows()
+        .map(|[a, b]| (*b - *a).num_seconds())
         .collect();
     intervals.sort();
     intervals[intervals.len() / 2]

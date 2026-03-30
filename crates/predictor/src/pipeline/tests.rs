@@ -435,8 +435,8 @@ fn test_forecast_timestamps_with_irregular_data() {
     let forecast_timestamps: Vec<_> = result.forecast_values.keys().collect();
     if forecast_timestamps.len() >= 2 {
         let intervals: Vec<i64> = forecast_timestamps
-            .windows(2)
-            .map(|w| (*w[1] - *w[0]).num_seconds())
+            .array_windows()
+            .map(|[a, b]| (**b - **a).num_seconds())
             .collect();
 
         // All intervals should be the same (median-based)
