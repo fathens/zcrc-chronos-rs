@@ -180,8 +180,15 @@ impl Predictor {
         // --- Phase 3: Post-training (calling thread) ---
 
         // Step 5: Inverse transform if log was applied
-        // Clamp before exp() to prevent f64::INFINITY (exp(709.78) ≈ f64::MAX)
-        let safe_exp = |v: &f64| -> f64 { v.min(709.0).exp() };
+        // Clamp before exp() to prevent f64::INFINITY.
+        // 709.0 = f64::MAX.ln().floor(); exp(709.78) ≈ f64::MAX, so 709.0 gives a safety margin.
+        // NaN must pass through so downstream f64s_to_decimals correctly rejects it.
+        let safe_exp = |v: &f64| -> f64 {
+            if v.is_nan() {
+                return f64::NAN;
+            }
+            v.min(709.0).exp()
+        };
 
         let final_mean: Vec<f64> = if log_transformed {
             forecast.mean.iter().map(safe_exp).collect()
