@@ -89,7 +89,8 @@ fn make_input(n: usize) -> PredictionInput {
                 + 1.5 * i as f64
                 + 30.0 * (2.0 * std::f64::consts::PI * i as f64 / 96.0).sin()
                 + 5.0 * (2.0 * std::f64::consts::PI * i as f64 / 672.0).sin();
-            let decimal = BigDecimal::from_str(&format!("{val:.8}")).unwrap();
+            // Use 22 significant digits to match production data (avg 22, max 33)
+            let decimal = BigDecimal::from_str(&format!("{val:.20}")).unwrap();
             (ts, decimal)
         })
         .collect();
@@ -100,84 +101,69 @@ fn make_input(n: usize) -> PredictionInput {
     }
 }
 
-fn run_sequential_test(pool_threads: usize, input: &PredictionInput, num_predictions: usize) {
-    let predictor = Predictor::new(pool_threads).unwrap();
-
-    let rss_before = get_rss_bytes();
-    let start = Instant::now();
-
-    let mut peak_rss = rss_before;
-    for i in 0..num_predictions {
-        let result = predictor.predict(input);
-        let rss_now = get_rss_bytes();
-        peak_rss = peak_rss.max(rss_now);
-        match result {
-            Ok(f) => println!(
-                "  prediction {}: {} forecast points, RSS: {}",
-                i + 1,
-                f.forecast_values.len(),
-                format_bytes(rss_now)
-            ),
-            Err(e) => println!("  prediction {} failed: {e}", i + 1),
-        }
-    }
-
-    let elapsed = start.elapsed();
-    let rss_after = get_rss_bytes();
-
-    println!("  --- Summary ---");
-    println!("  Time: {:.2}s", elapsed.as_secs_f64());
-    println!("  RSS before: {}", format_bytes(rss_before));
-    println!("  RSS after:  {}", format_bytes(rss_after));
-    println!("  Peak RSS:   {}", format_bytes(peak_rss));
-    println!(
-        "  RSS delta:  {}",
-        format_bytes(peak_rss.saturating_sub(rss_before))
-    );
-}
-
-fn run_concurrent_test(pool_threads: usize, input: &PredictionInput, num_threads: usize) {
+/// Run total_predictions predictions across num_threads threads concurrently.
+/// Mimics production: buffer_unordered(num_threads) processing total_predictions tokens.
+fn run_concurrent_test(
+    pool_threads: usize,
+    input: &PredictionInput,
+    num_threads: usize,
+    total_predictions: usize,
+) {
     let predictor = Arc::new(Predictor::new(pool_threads).unwrap());
+    let work_per_thread = total_predictions.div_ceil(num_threads);
 
     let rss_before = get_rss_bytes();
     let start = Instant::now();
 
     let handles: Vec<_> = (0..num_threads)
-        .map(|_| {
+        .map(|t| {
             let predictor = predictor.clone();
             let input = input.clone();
-            std::thread::spawn(move || predictor.predict(&input))
+            let count = if t < num_threads - 1 {
+                work_per_thread
+            } else {
+                total_predictions - work_per_thread * t
+            };
+            std::thread::spawn(move || {
+                let mut ok = 0usize;
+                let mut fail = 0usize;
+                for _ in 0..count {
+                    match predictor.predict(&input) {
+                        Ok(_) => ok += 1,
+                        Err(_) => fail += 1,
+                    }
+                }
+                (ok, fail)
+            })
         })
         .collect();
 
+    let mut total_ok = 0;
+    let mut total_fail = 0;
     for (i, h) in handles.into_iter().enumerate() {
-        match h.join().unwrap() {
-            Ok(f) => println!(
-                "  thread {}: {} forecast points",
-                i,
-                f.forecast_values.len()
-            ),
-            Err(e) => println!("  thread {i} failed: {e}"),
-        }
+        let (ok, fail) = h.join().unwrap();
+        println!("  thread {i}: {ok} ok, {fail} failed");
+        total_ok += ok;
+        total_fail += fail;
     }
 
     let elapsed = start.elapsed();
     let rss_after = get_rss_bytes();
-    let peak_rss = get_rss_bytes(); // approximate: measured after join
 
     println!("  --- Summary ---");
+    println!("  Predictions: {total_ok} ok, {total_fail} failed");
     println!("  Time: {:.2}s", elapsed.as_secs_f64());
     println!("  RSS before: {}", format_bytes(rss_before));
     println!("  RSS after:  {}", format_bytes(rss_after));
     println!(
         "  RSS delta:  {}",
-        format_bytes(peak_rss.saturating_sub(rss_before))
+        format_bytes(rss_after.saturating_sub(rss_before))
     );
 }
 
 fn main() {
     let data_size = 2880;
-    let num_predictions = 5;
+    let num_predictions = 293; // Match production token count
     let num_concurrent = 4;
 
     println!("=== Memory Profile: Predictor ===");
@@ -187,17 +173,12 @@ fn main() {
 
     let input = make_input(data_size);
 
-    // Sequential tests
+    // Concurrent tests: 4 threads processing 293 predictions (matching production)
     for pool_threads in [1, 2, 3] {
-        println!("--- Sequential: pool_threads={pool_threads}, {num_predictions} predictions ---");
-        run_sequential_test(pool_threads, &input, num_predictions);
-        println!();
-    }
-
-    // Concurrent tests
-    for pool_threads in [1, 2, 3] {
-        println!("--- Concurrent: pool_threads={pool_threads}, {num_concurrent} threads ---");
-        run_concurrent_test(pool_threads, &input, num_concurrent);
+        println!(
+            "--- pool_threads={pool_threads}, {num_concurrent} threads, {num_predictions} predictions ---"
+        );
+        run_concurrent_test(pool_threads, &input, num_concurrent, num_predictions);
         println!();
     }
 
