@@ -61,7 +61,7 @@ fn test_concurrent_predictions_all_succeed() {
 
 #[test]
 #[ignore] // Timing-dependent: run manually with `cargo test -- --ignored`
-fn test_pool_threads_affects_throughput() {
+fn test_pool_threads_not_significantly_slower() {
     let input = make_input(500);
     let num_concurrent = 4;
 

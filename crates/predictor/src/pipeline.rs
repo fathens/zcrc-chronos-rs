@@ -151,6 +151,9 @@ impl Predictor {
         let strategy_name = strategy.strategy_name.clone();
 
         // --- Phase 2: Training (pool threads) ---
+        // pool.spawn (not pool.install): ensures the calling thread does NOT
+        // participate in rayon's work-stealing, so concurrent predict() calls
+        // each wait on their own channel without becoming worker threads.
 
         let hints = trainer::TrainingHints {
             season_period,
@@ -182,18 +185,8 @@ impl Predictor {
         // --- Phase 3: Post-training (calling thread) ---
 
         // Step 5: Inverse transform if log was applied
-        // Clamp before exp() to prevent f64::INFINITY.
-        // 709.0 = f64::MAX.ln().floor(); exp(709.78) ≈ f64::MAX, so 709.0 gives a safety margin.
-        // NaN must pass through so downstream f64s_to_decimals correctly rejects it.
-        let safe_exp = |v: &f64| -> f64 {
-            if v.is_nan() {
-                return f64::NAN;
-            }
-            v.min(709.0).exp()
-        };
-
         let final_mean: Vec<f64> = if log_transformed {
-            forecast.mean.iter().map(safe_exp).collect()
+            forecast.mean.iter().copied().map(safe_exp).collect()
         } else {
             forecast.mean
         };
@@ -201,7 +194,7 @@ impl Predictor {
         let final_lower: Option<Vec<f64>> = if log_transformed {
             forecast
                 .lower_quantile
-                .map(|v| v.iter().map(safe_exp).collect())
+                .map(|v| v.iter().copied().map(safe_exp).collect())
         } else {
             forecast.lower_quantile
         };
@@ -209,7 +202,7 @@ impl Predictor {
         let final_upper: Option<Vec<f64>> = if log_transformed {
             forecast
                 .upper_quantile
-                .map(|v| v.iter().map(safe_exp).collect())
+                .map(|v| v.iter().copied().map(safe_exp).collect())
         } else {
             forecast.upper_quantile
         };
@@ -268,6 +261,21 @@ impl Predictor {
     }
 }
 
+/// Clamp before exp() to prevent f64::INFINITY.
+/// 709.0 = f64::MAX.ln().floor(); exp(709.78) ≈ f64::MAX, so 709.0 gives a safety margin.
+/// NaN passes through so downstream f64s_to_decimals correctly rejects it.
+fn safe_exp(v: f64) -> f64 {
+    if v.is_nan() {
+        return f64::NAN;
+    }
+    if v > 709.0 {
+        tracing::warn!(value = v, "clamping exp() input to 709.0");
+        709.0_f64.exp()
+    } else {
+        v.exp()
+    }
+}
+
 /// Calculate median sampling interval in seconds.
 fn calculate_median_interval(timestamps: &[NaiveDateTime]) -> i64 {
     if timestamps.len() < 2 {
@@ -292,7 +300,7 @@ fn horizon_to_steps(horizon: &TimeDelta, timestamps: &[NaiveDateTime]) -> usize 
 
     // Convert horizon to steps (ceiling division, minimum 1)
     let horizon_secs = horizon.num_seconds();
-    let steps = ((horizon_secs + median_interval - 1) / median_interval) as usize;
+    let steps = (horizon_secs.saturating_add(median_interval - 1) / median_interval) as usize;
     steps.max(1)
 }
 
