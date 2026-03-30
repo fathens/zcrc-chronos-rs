@@ -54,7 +54,7 @@ fn compute_mase(forecast: &[f64], actual: &[f64], train: &[f64], season: usize) 
 }
 
 fn run_pipeline(train_values: &[f64], horizon: usize) -> Vec<f64> {
-    use predictor::{predict, PredictionInput};
+    use predictor::{PredictionInput, predict};
 
     let input = PredictionInput {
         data: make_data(train_values),

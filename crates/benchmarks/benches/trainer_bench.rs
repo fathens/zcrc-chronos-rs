@@ -4,7 +4,7 @@
 
 use chrono::{NaiveDate, NaiveDateTime};
 use common::ModelSelectionStrategy;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use trainer::{HierarchicalTrainer, TrainingHints};
 
 fn make_timestamps(n: usize) -> Vec<NaiveDateTime> {

@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 
 use analyzer::TimeSeriesAnalyzer;
 use chrono::{NaiveDateTime, TimeDelta};
-use common::{decimals_to_f64s, f64s_to_decimals, BigDecimal, ChronosError, Result};
+use common::{BigDecimal, ChronosError, Result, decimals_to_f64s, f64s_to_decimals};
 use normalize::normalize_time_series_data;
 use selector::AdaptiveModelSelector;
 use serde::{Deserialize, Serialize};
@@ -128,7 +128,9 @@ impl Predictor {
                 let log_vals: Vec<f64> = norm_values.iter().map(|v| v.ln()).collect();
                 (log_vals, true)
             } else {
-                info!("Exponential trend detected but data contains non-positive values, skipping log transform");
+                info!(
+                    "Exponential trend detected but data contains non-positive values, skipping log transform"
+                );
                 (norm_values.clone(), false)
             }
         } else {

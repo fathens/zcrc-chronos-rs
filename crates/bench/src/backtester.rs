@@ -1,7 +1,7 @@
 use chrono::{NaiveDateTime, TimeDelta};
-use common::{decimals_to_f64s, BigDecimal, ForecastModel, ForecastOutput};
+use common::{BigDecimal, ForecastModel, ForecastOutput, decimals_to_f64s};
 use models::{EtsModel, MstlEtsModel, NptsModel, SeasonalNaiveModel, ThetaModel};
-use predictor::{predict, PredictionInput};
+use predictor::{PredictionInput, predict};
 use std::collections::BTreeMap;
 use tracing::{debug, warn};
 

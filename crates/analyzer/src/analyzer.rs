@@ -79,11 +79,7 @@ impl TimeSeriesAnalyzer {
         let volatility = if values.len() > 1 {
             let std = std_dev(values);
             let mean_abs = mean(&values.iter().map(|v| v.abs()).collect::<Vec<_>>());
-            if mean_abs > 0.0 {
-                std / mean_abs
-            } else {
-                0.0
-            }
+            if mean_abs > 0.0 { std / mean_abs } else { 0.0 }
         } else {
             0.0
         };
@@ -457,11 +453,7 @@ impl TimeSeriesAnalyzer {
         let p_value = 2.0 * (1.0 - normal.cdf(z.abs()));
 
         let trend = if p_value < 0.05 {
-            if s > 0 {
-                "increasing"
-            } else {
-                "decreasing"
-            }
+            if s > 0 { "increasing" } else { "decreasing" }
         } else {
             "none"
         };
@@ -571,7 +563,7 @@ impl TimeSeriesAnalyzer {
         let iqr_outliers: Vec<usize> = values
             .iter()
             .enumerate()
-            .filter(|(_, &v)| v < lower_bound || v > upper_bound)
+            .filter(|&(_, &v)| v < lower_bound || v > upper_bound)
             .map(|(i, _)| i)
             .collect();
 
@@ -582,7 +574,7 @@ impl TimeSeriesAnalyzer {
             values
                 .iter()
                 .enumerate()
-                .filter(|(_, &v)| ((v - m) / sd).abs() > 3.0)
+                .filter(|&(_, &v)| ((v - m) / sd).abs() > 3.0)
                 .map(|(i, _)| i)
                 .collect()
         } else {
