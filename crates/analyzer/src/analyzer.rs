@@ -1,7 +1,7 @@
 use chrono::NaiveDateTime;
 use common::{
-    DensityInfo, FrequencyInfo, MannKendallResult, MissingPatternInfo, OutlierInfo,
-    SeasonalityInfo, StationarityInfo, TimeSeriesCharacteristics, TrendInfo,
+    DensityInfo, FrequencyInfo, MannKendallResult, MissingPatternInfo, OutlierInfo, RegimeInfo,
+    SeasonalityInfo, StationarityInfo, TimeSeriesCharacteristics, TimeSeriesRegime, TrendInfo,
 };
 use num_complex::Complex;
 use rustfft::FftPlanner;
@@ -62,6 +62,7 @@ impl TimeSeriesAnalyzer {
         let density = self.analyze_time_intervals(timestamps);
         let stationarity = self.test_stationarity(values);
         let frequency = self.estimate_frequency(timestamps);
+        let regime = self.detect_regime(values);
 
         Ok(TimeSeriesCharacteristics {
             trend,
@@ -72,6 +73,7 @@ impl TimeSeriesAnalyzer {
             missing_pattern,
             density,
             outliers,
+            regime,
         })
     }
 
@@ -103,6 +105,7 @@ impl TimeSeriesAnalyzer {
             missing_pattern: MissingPatternInfo::default(),
             outliers: OutlierInfo::default(),
             frequency: FrequencyInfo::default(),
+            regime: RegimeInfo::default(),
         }
     }
 
@@ -682,6 +685,83 @@ impl TimeSeriesAnalyzer {
         }
     }
 
+    // ---- Regime Detection (Variance Ratio Test) ----
+
+    /// Default lags for the variance ratio test.
+    /// q=2 is the primary lag (most statistical power for detecting departures
+    /// from random walk). q=5 and q=10 capture medium- and longer-range persistence.
+    const VR_LAGS: [usize; 3] = [2, 5, 10];
+
+    /// Detect whether the time series is trending, mean-reverting, or a random walk
+    /// using the Lo-MacKinlay Variance Ratio Test with heteroscedasticity-robust
+    /// z-statistics.
+    ///
+    /// For price data, log-returns are used: r_t = ln(p_t / p_{t-1}).
+    /// For non-positive data, simple differences are used as fallback.
+    pub fn detect_regime(&self, values: &[f64]) -> RegimeInfo {
+        if values.len() < 20 {
+            debug!("Insufficient data for regime detection, defaulting to RandomWalk");
+            return RegimeInfo::default();
+        }
+
+        let use_log_returns = values.iter().all(|&v| v > 0.0);
+        let returns: Vec<f64> = if use_log_returns {
+            values.array_windows().map(|&[a, b]| (b / a).ln()).collect()
+        } else {
+            values.array_windows().map(|&[a, b]| b - a).collect()
+        };
+
+        if returns.len() < 10 {
+            return RegimeInfo::default();
+        }
+
+        let mut best_result: Option<(usize, f64, f64, f64)> = None;
+        let mut best_abs_z = 0.0_f64;
+
+        for &q in &Self::VR_LAGS {
+            if let Some((vr, z, p)) = variance_ratio_test(&returns, q) {
+                debug!(
+                    lag = q,
+                    vr = format!("{:.4}", vr),
+                    z = format!("{:.3}", z),
+                    p = format!("{:.4}", p),
+                    "Variance ratio test"
+                );
+                if z.abs() > best_abs_z {
+                    best_abs_z = z.abs();
+                    best_result = Some((q, vr, z, p));
+                }
+            }
+        }
+
+        let (lag, variance_ratio, z_statistic, p_value) = best_result.unwrap_or((2, 1.0, 0.0, 1.0));
+
+        let regime = if p_value < 0.05 {
+            if z_statistic > 0.0 {
+                TimeSeriesRegime::Trending
+            } else {
+                TimeSeriesRegime::MeanReverting
+            }
+        } else {
+            TimeSeriesRegime::RandomWalk
+        };
+
+        debug!(
+            regime = ?regime,
+            lag = lag,
+            vr = format!("{:.4}", variance_ratio),
+            "Regime detection complete"
+        );
+
+        RegimeInfo {
+            regime,
+            variance_ratio,
+            z_statistic,
+            p_value,
+            lag,
+        }
+    }
+
     // ---- Frequency Estimation ----
 
     /// Port of `_estimate_frequency()`.
@@ -870,6 +950,51 @@ fn t_test_p_value(t: f64, _df: f64) -> f64 {
     // For simplicity, use normal approximation (good for df > 30, reasonable otherwise).
     let normal = Normal::new(0.0, 1.0).unwrap();
     2.0 * (1.0 - normal.cdf(t.abs()))
+}
+
+/// Lo-MacKinlay Variance Ratio Test.
+///
+/// Tests H0: the time series is a random walk (VR = 1).
+/// Uses the asymptotic variance under iid (homoscedastic) null:
+///   Var(VR(q)-1) = 2(2q-1)(q-1) / (3qT)
+///
+/// Returns (VR(q), z, p_value) or None if insufficient data.
+fn variance_ratio_test(returns: &[f64], q: usize) -> Option<(f64, f64, f64)> {
+    let t = returns.len();
+    if q < 2 || t < q + 4 {
+        return None;
+    }
+
+    let mu = returns.iter().sum::<f64>() / t as f64;
+
+    let sigma2_1 = returns.iter().map(|r| (r - mu).powi(2)).sum::<f64>() / (t - 1) as f64;
+    if sigma2_1 < 1e-30 {
+        return None;
+    }
+
+    let q_returns: Vec<f64> = returns.windows(q).map(|w| w.iter().sum::<f64>()).collect();
+    let nq = q_returns.len();
+    if nq < 2 {
+        return None;
+    }
+    let mu_q = mu * q as f64;
+    let sigma2_q = q_returns.iter().map(|r| (r - mu_q).powi(2)).sum::<f64>() / ((t - q + 1) as f64);
+
+    let vr = sigma2_q / (q as f64 * sigma2_1);
+
+    let q_f = q as f64;
+    let t_f = t as f64;
+    let asymptotic_var = 2.0 * (2.0 * q_f - 1.0) * (q_f - 1.0) / (3.0 * q_f * t_f);
+    if asymptotic_var < 1e-30 {
+        return None;
+    }
+
+    let z = (vr - 1.0) / asymptotic_var.sqrt();
+
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    let p_value = 2.0 * (1.0 - normal.cdf(z.abs()));
+
+    Some((vr, z, p_value))
 }
 
 /// Simple peak finding: local maxima above a height threshold.
@@ -1222,5 +1347,101 @@ mod tests {
                 n
             );
         }
+    }
+
+    // ---- Regime Detection (Variance Ratio) Tests ----
+
+    #[test]
+    fn test_regime_linear_trend_is_trending() {
+        let analyzer = TimeSeriesAnalyzer::new();
+        let vals: Vec<f64> = (0..200).map(|i| 100.0 + 2.0 * i as f64).collect();
+        let regime = analyzer.detect_regime(&vals);
+        assert_eq!(
+            regime.regime,
+            common::TimeSeriesRegime::Trending,
+            "strong linear trend should be Trending, got VR={:.4} z={:.3}",
+            regime.variance_ratio,
+            regime.z_statistic
+        );
+        assert!(regime.variance_ratio > 1.0);
+    }
+
+    #[test]
+    fn test_regime_mean_reverting_oscillation() {
+        let analyzer = TimeSeriesAnalyzer::new();
+        // Alternating pattern: up-down-up-down (strongly mean-reverting)
+        let vals: Vec<f64> = (0..200)
+            .map(|i| 100.0 + if i % 2 == 0 { 5.0 } else { -5.0 })
+            .collect();
+        let regime = analyzer.detect_regime(&vals);
+        assert_eq!(
+            regime.regime,
+            common::TimeSeriesRegime::MeanReverting,
+            "alternating series should be MeanReverting, got VR={:.4} z={:.3}",
+            regime.variance_ratio,
+            regime.z_statistic
+        );
+        assert!(regime.variance_ratio < 1.0);
+    }
+
+    #[test]
+    fn test_regime_constant_is_random_walk() {
+        let analyzer = TimeSeriesAnalyzer::new();
+        let vals = vec![100.0; 200];
+        let regime = analyzer.detect_regime(&vals);
+        assert_eq!(regime.regime, common::TimeSeriesRegime::RandomWalk);
+    }
+
+    #[test]
+    fn test_regime_insufficient_data_defaults() {
+        let analyzer = TimeSeriesAnalyzer::new();
+        let vals: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let regime = analyzer.detect_regime(&vals);
+        assert_eq!(regime.regime, common::TimeSeriesRegime::RandomWalk);
+        assert!((regime.variance_ratio - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_regime_random_walk_cumulative_sum() {
+        let analyzer = TimeSeriesAnalyzer::new();
+        // Deterministic pseudo-random walk using a simple LCG
+        let mut rng_state: u64 = 42;
+        let mut price = 100.0;
+        let vals: Vec<f64> = (0..500)
+            .map(|_| {
+                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let u = (rng_state >> 33) as f64 / (1u64 << 31) as f64;
+                price += (u - 0.5) * 2.0;
+                price
+            })
+            .collect();
+        let regime = analyzer.detect_regime(&vals);
+        // Random walk should not be classified as Trending or MeanReverting
+        // (p_value should be > 0.05, or at least VR should be close to 1.0)
+        assert!(
+            (regime.variance_ratio - 1.0).abs() < 0.5,
+            "random walk VR should be near 1.0, got {:.4}",
+            regime.variance_ratio
+        );
+    }
+
+    #[test]
+    fn test_variance_ratio_test_helper() {
+        // Known case: constant returns → VR = 1 (or undefined if variance is 0)
+        let returns = vec![0.01; 100];
+        let result = super::variance_ratio_test(&returns, 2);
+        // Constant returns → zero variance → should return None
+        assert!(result.is_none());
+
+        // Alternating returns → VR < 1
+        let returns: Vec<f64> = (0..200)
+            .map(|i| if i % 2 == 0 { 0.01 } else { -0.01 })
+            .collect();
+        let result = super::variance_ratio_test(&returns, 2).unwrap();
+        assert!(
+            result.0 < 1.0,
+            "alternating returns should have VR < 1, got {:.4}",
+            result.0
+        );
     }
 }

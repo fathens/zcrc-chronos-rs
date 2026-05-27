@@ -54,6 +54,45 @@ pub struct TimeSeriesCharacteristics {
     pub missing_pattern: MissingPatternInfo,
     pub density: DensityInfo,
     pub outliers: OutlierInfo,
+    pub regime: RegimeInfo,
+}
+
+/// Time series regime classification based on Variance Ratio Test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeSeriesRegime {
+    /// VR > 1 (significant): returns are positively autocorrelated, trend-following.
+    Trending,
+    /// VR ≈ 1: returns are uncorrelated, consistent with random walk.
+    RandomWalk,
+    /// VR < 1 (significant): returns are negatively autocorrelated, mean-reverting.
+    MeanReverting,
+}
+
+/// Regime detection result from the Lo-MacKinlay Variance Ratio Test.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegimeInfo {
+    pub regime: TimeSeriesRegime,
+    /// Variance ratio VR(q) at the primary lag.
+    pub variance_ratio: f64,
+    /// z-statistic for the VR test.
+    pub z_statistic: f64,
+    /// Two-sided p-value.
+    pub p_value: f64,
+    /// The lag q used for the primary test.
+    pub lag: usize,
+}
+
+impl Default for RegimeInfo {
+    fn default() -> Self {
+        Self {
+            regime: TimeSeriesRegime::RandomWalk,
+            variance_ratio: 1.0,
+            z_statistic: 0.0,
+            p_value: 1.0,
+            lag: 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
