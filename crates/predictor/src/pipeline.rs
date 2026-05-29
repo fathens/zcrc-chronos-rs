@@ -3,7 +3,9 @@ use std::sync::LazyLock;
 
 use analyzer::TimeSeriesAnalyzer;
 use chrono::{NaiveDateTime, TimeDelta};
-use common::{BigDecimal, ChronosError, Result, decimals_to_f64s, f64s_to_decimals};
+use common::{
+    BigDecimal, ChronosError, Result, TimeSeriesRegime, decimals_to_f64s, f64s_to_decimals,
+};
 use normalize::normalize_time_series_data;
 use selector::AdaptiveModelSelector;
 use serde::{Deserialize, Serialize};
@@ -122,7 +124,7 @@ impl Predictor {
         let is_exponential = characteristics.trend.is_exponential;
 
         // Step 2.5: Apply log transform if exponential trend detected
-        let (train_values, log_transformed) = if is_exponential {
+        let (log_values, log_transformed) = if is_exponential {
             if norm_values.iter().all(|&v| v > 0.0) {
                 info!("Exponential trend detected, applying log transform");
                 let log_vals: Vec<f64> = norm_values.iter().map(|v| v.ln()).collect();
@@ -135,6 +137,41 @@ impl Predictor {
             }
         } else {
             (norm_values.clone(), false)
+        };
+
+        // Step 2.6: Apply linear detrend if the series is significantly trending.
+        // This is gated on the Variance Ratio Test regime — only applied when the
+        // series shows persistent autocorrelation (not on random walks), avoiding
+        // the false-trend extrapolation that hurts random walk tokens.
+        // Skipped when log transform was applied, since log transform already
+        // compresses exponential trends.
+        let detrend_state =
+            if !log_transformed && characteristics.regime.regime == TimeSeriesRegime::Trending {
+                let slope = characteristics.trend.slope;
+                let intercept = characteristics.trend.intercept;
+                info!(
+                    slope = format!("{:.6}", slope),
+                    intercept = format!("{:.6}", intercept),
+                    vr = format!("{:.4}", characteristics.regime.variance_ratio),
+                    "Trending regime detected, applying linear detrend"
+                );
+                Some(DetrendState {
+                    slope,
+                    intercept,
+                    training_len: log_values.len(),
+                })
+            } else {
+                None
+            };
+
+        let train_values: Vec<f64> = if let Some(ref state) = detrend_state {
+            log_values
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| v - (state.slope * i as f64 + state.intercept))
+                .collect()
+        } else {
+            log_values
         };
 
         // Step 3: Select strategy from pre-computed characteristics
@@ -186,27 +223,33 @@ impl Predictor {
 
         // --- Phase 3: Post-training (calling thread) ---
 
-        // Step 5: Inverse transform if log was applied
+        // Step 5a: Add the linear trend back to the forecast if detrend was applied.
+        // Forecast step i corresponds to original index (training_len + i).
+        let mean_after_trend = add_trend_if_detrended(forecast.mean, &detrend_state);
+        let lower_after_trend = forecast
+            .lower_quantile
+            .map(|v| add_trend_if_detrended(v, &detrend_state));
+        let upper_after_trend = forecast
+            .upper_quantile
+            .map(|v| add_trend_if_detrended(v, &detrend_state));
+
+        // Step 5b: Inverse transform if log was applied
         let final_mean: Vec<f64> = if log_transformed {
-            forecast.mean.iter().copied().map(safe_exp).collect()
+            mean_after_trend.iter().copied().map(safe_exp).collect()
         } else {
-            forecast.mean
+            mean_after_trend
         };
 
         let final_lower: Option<Vec<f64>> = if log_transformed {
-            forecast
-                .lower_quantile
-                .map(|v| v.iter().copied().map(safe_exp).collect())
+            lower_after_trend.map(|v| v.iter().copied().map(safe_exp).collect())
         } else {
-            forecast.lower_quantile
+            lower_after_trend
         };
 
         let final_upper: Option<Vec<f64>> = if log_transformed {
-            forecast
-                .upper_quantile
-                .map(|v| v.iter().copied().map(safe_exp).collect())
+            upper_after_trend.map(|v| v.iter().copied().map(safe_exp).collect())
         } else {
-            forecast.upper_quantile
+            upper_after_trend
         };
 
         let processing_time = start.elapsed().as_secs_f64();
@@ -215,6 +258,7 @@ impl Predictor {
             strategy = %strategy_name,
             models = metadata.model_count,
             log_transformed = log_transformed,
+            detrended = detrend_state.is_some(),
             time_secs = processing_time,
             "Prediction pipeline complete"
         );
@@ -260,6 +304,29 @@ impl Predictor {
             processing_time_secs: processing_time,
             model_count: metadata.model_count,
         })
+    }
+}
+
+/// State captured when linear detrend is applied, used to re-add the trend
+/// to the forecast in post-processing.
+#[derive(Debug, Clone)]
+struct DetrendState {
+    slope: f64,
+    intercept: f64,
+    /// Number of training samples (the index where forecasting begins).
+    training_len: usize,
+}
+
+/// Add the linear trend back to a forecast vector. Forecast step i (0-indexed)
+/// corresponds to original-domain index `training_len + i`.
+fn add_trend_if_detrended(values: Vec<f64>, state: &Option<DetrendState>) -> Vec<f64> {
+    match state {
+        Some(s) => values
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| v + s.slope * (s.training_len + i) as f64 + s.intercept)
+            .collect(),
+        None => values,
     }
 }
 

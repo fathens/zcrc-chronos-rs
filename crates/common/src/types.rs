@@ -100,6 +100,10 @@ pub struct TrendInfo {
     pub strength: String,
     pub direction: String,
     pub slope: f64,
+    /// Y-intercept of the linear regression. Together with `slope`, fully
+    /// specifies the linear trend line: y = intercept + slope * x.
+    #[serde(default)]
+    pub intercept: f64,
     pub r_squared: f64,
     pub p_value: f64,
     pub mann_kendall: MannKendallResult,
@@ -114,6 +118,7 @@ impl Default for TrendInfo {
             strength: "unknown".into(),
             direction: "unknown".into(),
             slope: 0.0,
+            intercept: 0.0,
             r_squared: 0.0,
             p_value: 1.0,
             mann_kendall: MannKendallResult::default(),

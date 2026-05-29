@@ -54,6 +54,25 @@ fn test_predict_uptrend() {
     for i in 1..timestamps.len() {
         assert!(timestamps[i] > timestamps[i - 1]);
     }
+
+    // make_data(100) is y = 100 + 2*i for i in 0..99 (Trending regime).
+    // The forecast should preserve the linear trend, so values at i=100..109
+    // should be approximately 300, 302, ..., 318. Each value should be > the
+    // last training value (298) and trending upward.
+    let forecast_values: Vec<f64> = result
+        .forecast_values
+        .values()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+    assert!(
+        forecast_values[0] > 290.0,
+        "First forecast should be near 300 (trend extrapolation), got {}",
+        forecast_values[0]
+    );
+    assert!(
+        forecast_values.last().copied().unwrap() > forecast_values[0],
+        "Forecast should continue the uptrend"
+    );
 }
 
 #[test]
@@ -70,6 +89,48 @@ fn test_predict_flat() {
         let f = v.to_f64().unwrap();
         assert!((f - 42.0).abs() < 20.0, "Expected ~42, got {}", f);
     }
+}
+
+#[test]
+fn test_predict_random_walk_no_detrend() {
+    // Pseudo-random walk: the values drift but with no significant linear trend.
+    // The VR test should classify this as RandomWalk (not Trending), so detrend
+    // is not applied and the forecast stays near the last observed value
+    // rather than extrapolating a spurious trend.
+    let mut rng_state: u64 = 12345;
+    let mut price = 100.0;
+    let values: Vec<f64> = (0..200)
+        .map(|_| {
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let u = (rng_state >> 33) as f64 / (1u64 << 31) as f64;
+            price += (u - 0.5) * 0.5;
+            price
+        })
+        .collect();
+    let last_observed = values[values.len() - 1];
+
+    let input = PredictionInput {
+        data: make_data_with_values(&values),
+        horizon: TimeDelta::hours(10),
+    };
+
+    let result = predict(&input).unwrap();
+    let forecast_values: Vec<f64> = result
+        .forecast_values
+        .values()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+
+    // For a random walk, the forecast should stay close to the last observed
+    // value rather than extrapolating a trend. Allow a generous tolerance
+    // since the underlying models do produce some drift.
+    let last_forecast = forecast_values.last().copied().unwrap();
+    assert!(
+        (last_forecast - last_observed).abs() < 5.0,
+        "Random walk forecast drifted too far: last_observed={}, last_forecast={}",
+        last_observed,
+        last_forecast
+    );
 }
 
 #[test]

@@ -281,7 +281,7 @@ impl TimeSeriesAnalyzer {
         let n = values.len();
         let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
 
-        let (slope, _intercept, r_value, p_value, std_err) = linregress(&x, values);
+        let (slope, intercept, r_value, p_value, std_err) = linregress(&x, values);
         let r_squared = r_value * r_value;
 
         let strength = if r_squared > 0.7 {
@@ -317,6 +317,7 @@ impl TimeSeriesAnalyzer {
             strength: strength.into(),
             direction: direction.into(),
             slope,
+            intercept,
             r_squared,
             p_value,
             mann_kendall,
