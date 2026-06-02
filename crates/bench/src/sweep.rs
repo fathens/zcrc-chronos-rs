@@ -122,6 +122,13 @@ pub struct SweepRow {
     pub predicted_std_first: Option<f64>,
     pub predicted_std_last: Option<f64>,
 
+    // --- horizon-end returns (fuel for cross-sectional IC) ---
+    /// `(forecast[aligned-1] - train_last_value) / train_last_value`.
+    /// `None` when the job was skipped before metric computation.
+    pub final_pred_return: Option<f64>,
+    /// `(actual[aligned-1] - train_last_value) / train_last_value`.
+    pub final_actual_return: Option<f64>,
+
     // --- bookkeeping ---
     pub processing_time_secs: Option<f64>,
     pub error: Option<String>,
@@ -164,6 +171,8 @@ impl SweepRow {
             calibration_residual: None,
             predicted_std_first: None,
             predicted_std_last: None,
+            final_pred_return: None,
+            final_actual_return: None,
             processing_time_secs: None,
             error: Some(reason),
             diagnostic_path: None,
@@ -249,9 +258,11 @@ pub enum SweepError {
 /// Convenience alias for results returned by sweep functions.
 pub type SweepResult<T> = Result<T, SweepError>;
 
+pub mod aggregate;
 pub mod runner;
 pub mod safety;
 
+pub use aggregate::{aggregate_by_regime, aggregate_by_series, cross_sectional_ic};
 pub use runner::{JobSpec, MIN_TRAIN_SAMPLES, run_one, run_sweep};
 
 #[cfg(test)]

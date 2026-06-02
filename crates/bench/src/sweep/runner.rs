@@ -144,7 +144,14 @@ pub fn run_one(predictor: &Predictor, spec: JobSpec<'_>) -> SweepResult<SweepRow
         1,
     )?;
 
-    // ---- 6. predicted_std endpoints. ----
+    // ---- 6a. Horizon-end returns for cross-sectional IC. ----
+    let last_idx = aligned_horizon - 1;
+    let final_pred_return =
+        finite((forecast_truncated[last_idx] - train_last_value) / train_last_value);
+    let final_actual_return =
+        finite((alignment.actual_values[last_idx] - train_last_value) / train_last_value);
+
+    // ---- 6b. predicted_std endpoints. ----
     let (predicted_std_first, predicted_std_last) = match result.predicted_std.as_ref() {
         Some(map) => {
             let first = map.values().next().and_then(|d| d.to_f64());
@@ -187,6 +194,9 @@ pub fn run_one(predictor: &Predictor, spec: JobSpec<'_>) -> SweepResult<SweepRow
 
         predicted_std_first,
         predicted_std_last,
+
+        final_pred_return,
+        final_actual_return,
 
         processing_time_secs: finite(result.processing_time_secs),
         error: None,
@@ -401,14 +411,17 @@ pub fn run_sweep(config: SweepConfig) -> SweepResult<SweepReport> {
         "sweep complete",
     );
 
-    // Aggregations are filled in by Step 6. For now emit empty placeholders
-    // so the schema is stable.
+    let regime_summary = crate::sweep::aggregate::aggregate_by_regime(&rows);
+    let series_summary = crate::sweep::aggregate::aggregate_by_series(&rows);
+    let (cross_sectional_ic_by_date, cross_sectional_ic_n) =
+        crate::sweep::aggregate::cross_sectional_ic(&rows);
+
     Ok(SweepReport {
         rows,
-        regime_summary: Vec::new(),
-        series_summary: Vec::new(),
-        cross_sectional_ic_by_date: BTreeMap::new(),
-        cross_sectional_ic_n: BTreeMap::new(),
+        regime_summary,
+        series_summary,
+        cross_sectional_ic_by_date,
+        cross_sectional_ic_n,
     })
 }
 
