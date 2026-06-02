@@ -39,8 +39,10 @@ pub struct DirectionMetrics {
     pub total_count: usize,
     /// Spearman rank correlation between predicted and actual returns.
     /// Range: -1.0 to 1.0. A positive IC means the forecast's ranking of
-    /// returns matches reality. `NaN` when either series has zero variance.
-    pub ic: f64,
+    /// returns matches reality. `None` when either series has zero variance
+    /// or fewer than two observations — distinguishes "no ranking signal" from
+    /// "true zero correlation".
+    pub ic: Option<f64>,
     /// Median of `predicted_return - actual_return`. Positive values indicate
     /// the forecast is biased upward (predicts more than actual).
     pub calibration_residual: f64,
@@ -209,19 +211,20 @@ pub fn compute_calibration_buckets(
 }
 
 /// Spearman rank correlation between two equal-length series.
-/// Returns 0.0 when either series has zero variance (no ranking signal).
-fn spearman_correlation(x: &[f64], y: &[f64]) -> f64 {
+/// Returns `None` when fewer than two observations or either series has zero
+/// variance — distinguishes "no ranking signal" from "true zero correlation".
+pub(crate) fn spearman_correlation(x: &[f64], y: &[f64]) -> Option<f64> {
     assert_eq!(x.len(), y.len());
     if x.len() < 2 {
-        return 0.0;
+        return None;
     }
     let x_ranks = compute_ranks(x);
     let y_ranks = compute_ranks(y);
     pearson_correlation(&x_ranks, &y_ranks)
 }
 
-/// Pearson correlation. Returns 0.0 when either series has zero variance.
-fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
+/// Pearson correlation. Returns `None` when either series has zero variance.
+fn pearson_correlation(x: &[f64], y: &[f64]) -> Option<f64> {
     let n = x.len() as f64;
     let mean_x = x.iter().sum::<f64>() / n;
     let mean_y = y.iter().sum::<f64>() / n;
@@ -238,7 +241,11 @@ fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
     }
 
     let denom = (var_x * var_y).sqrt();
-    if denom < 1e-30 { 0.0 } else { cov / denom }
+    if denom < 1e-30 {
+        None
+    } else {
+        Some(cov / denom)
+    }
 }
 
 /// Average-rank tie handling (matches scipy.stats.rankdata default).
@@ -306,7 +313,9 @@ mod tests {
         let m = compute_direction_metrics(&forecast, &actual, current, 0.001);
         assert_eq!(m.dir_acc, 1.0);
         assert_eq!(m.dir_acc_filtered, Some(1.0));
-        assert!(m.ic > 0.99, "expected near-perfect IC, got {}", m.ic);
+        let ic =
+            m.ic.expect("ic should be Some when both series have variance");
+        assert!(ic > 0.99, "expected near-perfect IC, got {ic}");
     }
 
     #[test]
@@ -320,11 +329,9 @@ mod tests {
         assert_eq!(m.dir_acc_filtered, Some(0.0));
         // IC: monotonically increasing pred + monotonically decreasing actual
         // → ranks are perfectly inverted → IC = -1.
-        assert!(
-            (m.ic - (-1.0)).abs() < 1e-9,
-            "expected IC ≈ -1, got {}",
-            m.ic
-        );
+        let ic =
+            m.ic.expect("ic should be Some when ranks are non-degenerate");
+        assert!((ic - (-1.0)).abs() < 1e-9, "expected IC ≈ -1, got {ic}");
     }
 
     #[test]
@@ -385,7 +392,8 @@ mod tests {
         let actual: Vec<f64> = (0..50).map(|i| 100.0 + (i as f64 * 0.7).cos()).collect();
         let m = compute_direction_metrics(&forecast, &actual, current, 0.001);
         // No relationship → low |IC|
-        assert!(m.ic.abs() < 0.5, "expected near-zero IC, got {}", m.ic);
+        let ic = m.ic.expect("ic should be Some when series have variance");
+        assert!(ic.abs() < 0.5, "expected near-zero IC, got {ic}");
     }
 
     #[test]
@@ -393,6 +401,17 @@ mod tests {
         // Values 1, 2, 2, 3 → ranks 1, 2.5, 2.5, 4
         let ranks = compute_ranks(&[1.0, 2.0, 2.0, 3.0]);
         assert_eq!(ranks, vec![1.0, 2.5, 2.5, 4.0]);
+    }
+
+    #[test]
+    fn test_ic_is_none_when_forecast_has_zero_variance() {
+        let current = 100.0;
+        // All forecasts equal → pred_returns has zero variance → ranking
+        // signal is undefined.
+        let forecast = vec![100.5, 100.5, 100.5];
+        let actual = vec![100.5, 101.0, 99.5];
+        let m = compute_direction_metrics(&forecast, &actual, current, 0.001);
+        assert!(m.ic.is_none(), "expected None ic, got {:?}", m.ic);
     }
 
     #[test]

@@ -46,11 +46,9 @@ pub fn print_report(results: &[BacktestResult]) {
                 d.dir_acc_filtered
                     .map(|v| format!("{:.2}", v))
                     .unwrap_or_else(|| "-".to_string()),
-                if d.ic.is_finite() {
-                    format!("{:+.2}", d.ic)
-                } else {
-                    "-".to_string()
-                },
+                d.ic.filter(|v| v.is_finite())
+                    .map(|v| format!("{v:+.2}"))
+                    .unwrap_or_else(|| "-".to_string()),
             ),
             None => ("-".to_string(), "-".to_string(), "-".to_string()),
         };
@@ -105,18 +103,14 @@ pub fn print_report(results: &[BacktestResult]) {
         let avg_dir_acc = direction.iter().map(|d| d.dir_acc).sum::<f64>() / direction.len() as f64;
         let finite_ic: Vec<f64> = direction
             .iter()
-            .map(|d| d.ic)
+            .filter_map(|d| d.ic)
             .filter(|v| v.is_finite())
             .collect();
-        let avg_ic = if finite_ic.is_empty() {
-            f64::NAN
-        } else {
-            finite_ic.iter().sum::<f64>() / finite_ic.len() as f64
-        };
-        let ic_str = if avg_ic.is_nan() {
+        let ic_str = if finite_ic.is_empty() {
             "-".to_string()
         } else {
-            format!("{:+.3}", avg_ic)
+            let avg_ic = finite_ic.iter().sum::<f64>() / finite_ic.len() as f64;
+            format!("{avg_ic:+.3}")
         };
         println!(
             "  {:<20} avg DirAcc = {:.3}  avg IC = {}  ({} fixtures)",
