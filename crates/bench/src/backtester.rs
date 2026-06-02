@@ -6,9 +6,15 @@ use std::collections::BTreeMap;
 use tracing::{debug, warn};
 
 use crate::data_generator::TimeSeriesFixture;
+use crate::direction_metrics::{self, DirectionMetrics};
 use crate::metrics::{self, MetricSet};
 
 type ModelFactory<'a> = Box<dyn FnOnce() -> Box<dyn ForecastModel> + 'a>;
+
+/// Default magnitude threshold used to filter out flat predictions when
+/// computing `DirectionMetrics.dir_acc_filtered`. 0.5% return matches the
+/// threshold used in zaciraci's predict_sweep evaluation.
+pub const DEFAULT_SIGNAL_THRESHOLD: f64 = 0.005;
 
 /// Result of running a single model on a single fixture.
 #[derive(Debug, Clone)]
@@ -16,8 +22,28 @@ pub struct BacktestResult {
     pub fixture_name: String,
     pub model_name: String,
     pub metrics: MetricSet,
+    /// Direction-based metrics. `None` when the fixture's last training
+    /// value is zero, which makes returns undefined.
+    pub direction_metrics: Option<DirectionMetrics>,
     pub forecast: Vec<f64>,
     pub actual: Vec<f64>,
+}
+
+fn maybe_direction_metrics(
+    forecast: &[f64],
+    actual: &[f64],
+    train_values: &[f64],
+) -> Option<DirectionMetrics> {
+    let current = *train_values.last()?;
+    if current == 0.0 {
+        return None;
+    }
+    Some(direction_metrics::compute_direction_metrics(
+        forecast,
+        actual,
+        current,
+        DEFAULT_SIGNAL_THRESHOLD,
+    ))
 }
 
 /// Run all individual models + the full ensemble pipeline on a single fixture.
@@ -77,10 +103,13 @@ pub fn run_backtest(fixture: &TimeSeriesFixture) -> Vec<BacktestResult> {
                     &fixture.train_values,
                     season,
                 );
+                let dir =
+                    maybe_direction_metrics(forecast, &fixture.test_values, &fixture.train_values);
                 results.push(BacktestResult {
                     fixture_name: fixture.name.clone(),
                     model_name: name.to_string(),
                     metrics: ms,
+                    direction_metrics: dir,
                     forecast: forecast.clone(),
                     actual: fixture.test_values.clone(),
                 });
@@ -99,10 +128,16 @@ pub fn run_backtest(fixture: &TimeSeriesFixture) -> Vec<BacktestResult> {
             &fixture.train_values,
             season,
         );
+        let dir = maybe_direction_metrics(
+            &ensemble_result.mean,
+            &fixture.test_values,
+            &fixture.train_values,
+        );
         results.push(BacktestResult {
             fixture_name: fixture.name.clone(),
             model_name: ensemble_result.model_name.clone(),
             metrics: ms,
+            direction_metrics: dir,
             forecast: ensemble_result.mean.clone(),
             actual: fixture.test_values.clone(),
         });
