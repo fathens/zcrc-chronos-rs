@@ -260,6 +260,8 @@ pub type SweepResult<T> = Result<T, SweepError>;
 
 pub mod aggregate;
 #[cfg(feature = "cli")]
+pub mod loader;
+#[cfg(feature = "cli")]
 pub mod output;
 pub mod runner;
 pub mod safety;
