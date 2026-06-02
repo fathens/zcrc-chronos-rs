@@ -252,7 +252,7 @@ pub type SweepResult<T> = Result<T, SweepError>;
 pub mod runner;
 pub mod safety;
 
-pub use runner::{JobSpec, MIN_TRAIN_SAMPLES, run_one};
+pub use runner::{JobSpec, MIN_TRAIN_SAMPLES, run_one, run_sweep};
 
 #[cfg(test)]
 mod tests;

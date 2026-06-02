@@ -13,19 +13,23 @@
 //! evaluated horizon; if no step can be aligned the job is rejected with
 //! [`SweepError::InsufficientActual`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Mutex;
+use std::thread;
 
 use analyzer::TimeSeriesAnalyzer;
 use chrono::{NaiveDateTime, TimeDelta};
 use common::{BigDecimal, decimals_to_f64s};
 use num_traits::ToPrimitive;
 use predictor::{PredictionInput, Predictor};
+use tracing::{info, warn};
 
 use crate::sweep::safety::{
-    try_compute_direction_metrics, try_compute_metrics, validate_current_value,
-    validate_signal_threshold,
+    try_compute_direction_metrics, try_compute_metrics, validate_calibration_buckets,
+    validate_current_value, validate_signal_threshold,
 };
-use crate::sweep::{SeriesInput, SweepError, SweepResult, SweepRow};
+use crate::sweep::{SeriesInput, SweepConfig, SweepError, SweepReport, SweepResult, SweepRow};
 
 /// Minimum number of training samples required before a sweep job is
 /// allowed to call the predictor. Below this the regime detector returns
@@ -288,6 +292,229 @@ fn finite(value: f64) -> Option<f64> {
     if value.is_finite() { Some(value) } else { None }
 }
 
+/// One unit of work in the sweep job queue. The series itself is kept in
+/// `SweepConfig.series_universe` and looked up by index so that workers
+/// only move cheap copies (indices + scalars) through the queue.
+#[derive(Debug, Clone, Copy)]
+struct JobKey {
+    series_idx: usize,
+    history_secs: i64,
+    horizon_secs: i64,
+    eval_date: NaiveDateTime,
+}
+
+/// Run the full Cartesian sweep, parallelised across `config.workers` OS
+/// threads with `std::thread::scope`. Each worker owns an independent
+/// `Predictor::new(1)` to avoid inner-pool work-stealing between jobs.
+///
+/// The output rows are sorted into a stable canonical order so the report
+/// is byte-identical regardless of `config.workers` (verified by the
+/// determinism smoke test).
+pub fn run_sweep(config: SweepConfig) -> SweepResult<SweepReport> {
+    // ---- 1. Config validation. ----
+    validate_signal_threshold(config.signal_threshold)?;
+    validate_calibration_buckets(&config.calibration_buckets)?;
+    if config.series_universe.is_empty() {
+        return Err(SweepError::InvalidConfig(
+            "series_universe must not be empty".to_string(),
+        ));
+    }
+    if config.history_lens_secs.is_empty() {
+        return Err(SweepError::InvalidConfig(
+            "history_lens_secs must not be empty".to_string(),
+        ));
+    }
+    if config.horizons_secs.is_empty() {
+        return Err(SweepError::InvalidConfig(
+            "horizons_secs must not be empty".to_string(),
+        ));
+    }
+    if config.eval_dates.is_empty() {
+        return Err(SweepError::InvalidConfig(
+            "eval_dates must not be empty".to_string(),
+        ));
+    }
+    for (i, h) in config.history_lens_secs.iter().enumerate() {
+        if *h <= 0 {
+            return Err(SweepError::InvalidConfig(format!(
+                "history_lens_secs[{i}] must be positive, got {h}"
+            )));
+        }
+    }
+    for (i, h) in config.horizons_secs.iter().enumerate() {
+        if *h <= 0 {
+            return Err(SweepError::InvalidConfig(format!(
+                "horizons_secs[{i}] must be positive, got {h}"
+            )));
+        }
+    }
+
+    // ---- 2. Build the job list in canonical order. ----
+    let jobs = build_job_list(&config);
+    let total_jobs = jobs.len();
+    info!(
+        series = config.series_universe.len(),
+        history_lens = config.history_lens_secs.len(),
+        horizons = config.horizons_secs.len(),
+        eval_dates = config.eval_dates.len(),
+        workers = config.workers.get(),
+        total_jobs,
+        "sweep starting",
+    );
+
+    // ---- 3. Pre-flight: confirm a Predictor can be created for each worker. ----
+    // Failing fast here avoids spawning OS threads only to discover the
+    // pool builder is broken (e.g. exhausted file descriptors).
+    let workers = config.workers.get();
+    let mut predictors: Vec<Predictor> = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        predictors.push(Predictor::new(1)?);
+    }
+
+    // ---- 4. Run with dynamic work-stealing queue. ----
+    let queue: Mutex<VecDeque<JobKey>> = Mutex::new(jobs.into_iter().collect());
+    let rows: Mutex<Vec<SweepRow>> = Mutex::new(Vec::with_capacity(total_jobs));
+
+    thread::scope(|scope| {
+        for predictor in predictors.iter() {
+            let queue = &queue;
+            let rows = &rows;
+            let config_ref = &config;
+            scope.spawn(move || worker_loop(predictor, queue, rows, config_ref));
+        }
+    });
+
+    // ---- 5. Sort rows into canonical order for determinism. ----
+    let mut rows = rows.into_inner().unwrap_or_else(|p| p.into_inner());
+    rows.sort_by(|a, b| {
+        (&a.series_id, a.eval_date, a.history_secs, a.horizon_secs).cmp(&(
+            &b.series_id,
+            b.eval_date,
+            b.history_secs,
+            b.horizon_secs,
+        ))
+    });
+
+    info!(
+        rows = rows.len(),
+        errors = rows.iter().filter(|r| r.error.is_some()).count(),
+        "sweep complete",
+    );
+
+    // Aggregations are filled in by Step 6. For now emit empty placeholders
+    // so the schema is stable.
+    Ok(SweepReport {
+        rows,
+        regime_summary: Vec::new(),
+        series_summary: Vec::new(),
+        cross_sectional_ic_by_date: BTreeMap::new(),
+        cross_sectional_ic_n: BTreeMap::new(),
+    })
+}
+
+fn build_job_list(config: &SweepConfig) -> Vec<JobKey> {
+    let mut jobs = Vec::with_capacity(
+        config.series_universe.len()
+            * config.history_lens_secs.len()
+            * config.horizons_secs.len()
+            * config.eval_dates.len(),
+    );
+    for (series_idx, _) in config.series_universe.iter().enumerate() {
+        for &history_secs in &config.history_lens_secs {
+            for &horizon_secs in &config.horizons_secs {
+                for &eval_date in &config.eval_dates {
+                    jobs.push(JobKey {
+                        series_idx,
+                        history_secs,
+                        horizon_secs,
+                        eval_date,
+                    });
+                }
+            }
+        }
+    }
+    jobs
+}
+
+/// Pop jobs from the queue until empty, run each one, and append the
+/// resulting `SweepRow` (success, recoverable error, or panic) to the
+/// shared output buffer. A panic in `run_one` is caught and recorded as
+/// `SweepRow::skipped(...)` so the remaining queue continues processing.
+fn worker_loop(
+    predictor: &Predictor,
+    queue: &Mutex<VecDeque<JobKey>>,
+    rows: &Mutex<Vec<SweepRow>>,
+    config: &SweepConfig,
+) {
+    loop {
+        let job = {
+            let mut guard = queue.lock().expect("queue mutex poisoned");
+            guard.pop_front()
+        };
+        let Some(job) = job else { break };
+
+        let series = &config.series_universe[job.series_idx];
+        let spec = JobSpec {
+            series,
+            eval_date: job.eval_date,
+            history_secs: job.history_secs,
+            horizon_secs: job.horizon_secs,
+            signal_threshold: config.signal_threshold,
+        };
+
+        let row = match catch_unwind(AssertUnwindSafe(|| run_one(predictor, spec))) {
+            Ok(Ok(row)) => row,
+            Ok(Err(err)) => {
+                let reason = err.to_string();
+                warn!(
+                    series = %series.series_id,
+                    eval_date = %job.eval_date,
+                    history_secs = job.history_secs,
+                    horizon_secs = job.horizon_secs,
+                    error = %reason,
+                    "sweep job failed",
+                );
+                SweepRow::skipped(
+                    series.series_id.clone(),
+                    job.eval_date,
+                    job.history_secs,
+                    job.horizon_secs,
+                    reason,
+                )
+            }
+            Err(panic_payload) => {
+                let message = panic_message(&panic_payload);
+                warn!(
+                    series = %series.series_id,
+                    eval_date = %job.eval_date,
+                    panic = %message,
+                    "sweep job panicked",
+                );
+                SweepRow::skipped(
+                    series.series_id.clone(),
+                    job.eval_date,
+                    job.history_secs,
+                    job.horizon_secs,
+                    format!("panic: {message}"),
+                )
+            }
+        };
+
+        let mut guard = rows.lock().expect("rows mutex poisoned");
+        guard.push(row);
+    }
+}
+
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +628,83 @@ mod tests {
             Err(SweepError::InsufficientActual { .. }) => {}
             other => panic!("expected InsufficientActual, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn run_sweep_rejects_empty_universe() {
+        let config = SweepConfig {
+            series_universe: vec![],
+            history_lens_secs: vec![3600 * 24 * 30],
+            horizons_secs: vec![3600 * 24],
+            eval_dates: vec![ts(50)],
+            signal_threshold: crate::sweep::DEFAULT_SIGNAL_THRESHOLD,
+            calibration_buckets: crate::sweep::default_calibration_buckets(),
+            workers: std::num::NonZeroUsize::new(1).unwrap(),
+            diagnostic_dir: None,
+        };
+        match run_sweep(config) {
+            Err(SweepError::InvalidConfig(msg)) => assert!(msg.contains("series_universe")),
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_sweep_executes_full_grid_and_sorts_rows() {
+        let series_a = series_with_linear_trend(150);
+        let series_b = SeriesInput {
+            series_id: "alt".into(),
+            data: series_with_linear_trend(150).data,
+        };
+        let config = SweepConfig {
+            series_universe: vec![series_a, series_b],
+            history_lens_secs: vec![TimeDelta::hours(60).num_seconds()],
+            horizons_secs: vec![TimeDelta::hours(20).num_seconds()],
+            eval_dates: vec![ts(100), ts(110)],
+            signal_threshold: crate::sweep::DEFAULT_SIGNAL_THRESHOLD,
+            calibration_buckets: crate::sweep::default_calibration_buckets(),
+            workers: std::num::NonZeroUsize::new(2).unwrap(),
+            diagnostic_dir: None,
+        };
+        let report = run_sweep(config).expect("sweep succeeds");
+        assert_eq!(report.rows.len(), 4);
+        // Rows must be in canonical sorted order regardless of worker
+        // scheduling.
+        let ids: Vec<_> = report.rows.iter().map(|r| &r.series_id).collect();
+        assert_eq!(ids, vec!["alt", "alt", "synthetic", "synthetic"]);
+        let dates: Vec<_> = report.rows.iter().map(|r| r.eval_date).collect();
+        assert_eq!(dates, vec![ts(100), ts(110), ts(100), ts(110)]);
+    }
+
+    #[test]
+    fn run_sweep_records_per_job_errors_without_aborting() {
+        let series = series_with_linear_trend(150);
+        let config = SweepConfig {
+            series_universe: vec![series],
+            // Mix: one valid history window, one too short.
+            history_lens_secs: vec![
+                TimeDelta::hours(60).num_seconds(),
+                TimeDelta::hours(2).num_seconds(),
+            ],
+            horizons_secs: vec![TimeDelta::hours(20).num_seconds()],
+            eval_dates: vec![ts(100)],
+            signal_threshold: crate::sweep::DEFAULT_SIGNAL_THRESHOLD,
+            calibration_buckets: crate::sweep::default_calibration_buckets(),
+            workers: std::num::NonZeroUsize::new(1).unwrap(),
+            diagnostic_dir: None,
+        };
+        let report = run_sweep(config).expect("sweep succeeds");
+        assert_eq!(report.rows.len(), 2);
+        let with_error: Vec<_> = report.rows.iter().filter(|r| r.error.is_some()).collect();
+        let without_error: Vec<_> = report.rows.iter().filter(|r| r.error.is_none()).collect();
+        assert_eq!(with_error.len(), 1);
+        assert_eq!(without_error.len(), 1);
+        assert!(
+            with_error[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("insufficient training history")
+        );
     }
 
     #[test]
