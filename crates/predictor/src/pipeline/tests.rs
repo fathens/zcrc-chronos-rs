@@ -415,6 +415,42 @@ fn test_forecast_result_has_correct_timestamps() {
 }
 
 #[test]
+fn test_predicted_std_matches_quantile_band() {
+    // predicted_std must satisfy the contract
+    //   std[t] ≈ (upper[t] - lower[t]) / (2 * Z_SCORE_80_INTERVAL)
+    // whenever both bounds are present.
+    let data = make_data(120);
+    let input = PredictionInput {
+        data,
+        horizon: TimeDelta::hours(8),
+    };
+    let result = predict(&input).unwrap();
+
+    // If the strategy emits no quantile bands the contract is vacuously
+    // satisfied (predicted_std must also be None). Skip the inverse check.
+    let (Some(lower), Some(upper), Some(std)) = (
+        result.lower_bound.as_ref(),
+        result.upper_bound.as_ref(),
+        result.predicted_std.as_ref(),
+    ) else {
+        assert!(result.predicted_std.is_none());
+        return;
+    };
+
+    assert_eq!(std.len(), result.forecast_values.len());
+    for (ts, std_value) in std {
+        let lo = lower.get(ts).expect("lower bound missing for std ts");
+        let hi = upper.get(ts).expect("upper bound missing for std ts");
+        let lo_f = lo.to_f64().unwrap();
+        let hi_f = hi.to_f64().unwrap();
+        let expected = ((hi_f - lo_f) / (2.0 * Z_SCORE_80_INTERVAL)).max(0.0);
+        let actual = std_value.to_f64().unwrap();
+        assert!(actual >= 0.0, "predicted_std must be non-negative");
+        assert_relative_eq!(actual, expected, max_relative = 1e-9, epsilon = 1e-9);
+    }
+}
+
+#[test]
 fn test_forecast_result_with_daily_data() {
     let base = NaiveDate::from_ymd_opt(2024, 1, 1)
         .unwrap()

@@ -23,6 +23,11 @@ pub struct PredictionInput {
     pub horizon: TimeDelta,
 }
 
+/// Z-score for the 80% prediction interval (10th / 90th percentiles).
+/// Used to derive `predicted_std` from the quantile band as
+/// `(upper - lower) / (2 * Z_SCORE_80_INTERVAL)`.
+pub(crate) const Z_SCORE_80_INTERVAL: f64 = 1.281_551_565_544_6;
+
 /// Full result of a prediction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForecastResult {
@@ -32,6 +37,13 @@ pub struct ForecastResult {
     pub lower_bound: Option<BTreeMap<NaiveDateTime, BigDecimal>>,
     /// Upper confidence bound (90th percentile) with timestamps.
     pub upper_bound: Option<BTreeMap<NaiveDateTime, BigDecimal>>,
+    /// Approximated per-step predicted standard deviation in the original
+    /// (output) scale, derived from the 10/90 quantile band as
+    /// `(upper - lower) / (2 * Z_SCORE_80_INTERVAL)`. Assumes the band is
+    /// approximately Gaussian; for log-transformed series this is a
+    /// first-order approximation in the exponentiated domain. `None` when
+    /// either quantile bound is unavailable.
+    pub predicted_std: Option<BTreeMap<NaiveDateTime, BigDecimal>>,
     /// Name of model(s) used.
     pub model_name: String,
     /// Strategy selected.
@@ -272,8 +284,9 @@ impl Predictor {
             .collect();
 
         let lower_bound = final_lower
+            .as_ref()
             .map(|v| {
-                f64s_to_decimals(&v).map(|decimals| {
+                f64s_to_decimals(v).map(|decimals| {
                     forecast_timestamps
                         .iter()
                         .zip(decimals.into_iter())
@@ -284,8 +297,9 @@ impl Predictor {
             .transpose()?;
 
         let upper_bound = final_upper
+            .as_ref()
             .map(|v| {
-                f64s_to_decimals(&v).map(|decimals| {
+                f64s_to_decimals(v).map(|decimals| {
                     forecast_timestamps
                         .iter()
                         .zip(decimals.into_iter())
@@ -295,10 +309,29 @@ impl Predictor {
             })
             .transpose()?;
 
+        let predicted_std = match (final_lower.as_ref(), final_upper.as_ref()) {
+            (Some(lo), Some(hi)) if lo.len() == hi.len() => {
+                let std_values: Vec<f64> = lo
+                    .iter()
+                    .zip(hi.iter())
+                    .map(|(l, u)| ((u - l) / (2.0 * Z_SCORE_80_INTERVAL)).max(0.0))
+                    .collect();
+                let decimals = f64s_to_decimals(&std_values)?;
+                let map: BTreeMap<NaiveDateTime, BigDecimal> = forecast_timestamps
+                    .iter()
+                    .zip(decimals)
+                    .map(|(ts, val)| (*ts, val))
+                    .collect();
+                Some(map)
+            }
+            _ => None,
+        };
+
         Ok(ForecastResult {
             forecast_values,
             lower_bound,
             upper_bound,
+            predicted_std,
             model_name: forecast.model_name,
             strategy_name,
             processing_time_secs: processing_time,
