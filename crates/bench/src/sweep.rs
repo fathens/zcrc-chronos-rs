@@ -249,5 +249,7 @@ pub enum SweepError {
 /// Convenience alias for results returned by sweep functions.
 pub type SweepResult<T> = Result<T, SweepError>;
 
+pub mod safety;
+
 #[cfg(test)]
 mod tests;
