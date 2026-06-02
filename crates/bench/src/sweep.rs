@@ -249,7 +249,10 @@ pub enum SweepError {
 /// Convenience alias for results returned by sweep functions.
 pub type SweepResult<T> = Result<T, SweepError>;
 
+pub mod runner;
 pub mod safety;
+
+pub use runner::{JobSpec, MIN_TRAIN_SAMPLES, run_one};
 
 #[cfg(test)]
 mod tests;
