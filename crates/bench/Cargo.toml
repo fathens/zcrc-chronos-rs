@@ -34,3 +34,8 @@ csv = { workspace = true }
 [features]
 default = ["cli"]
 cli = ["dep:anyhow", "dep:clap", "dep:csv", "dep:serde_json", "dep:tracing-subscriber"]
+
+[[bin]]
+name = "predict_sweep"
+path = "src/bin/predict_sweep.rs"
+required-features = ["cli"]
