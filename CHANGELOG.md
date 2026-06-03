@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Regime detection via Lo-MacKinlay Variance Ratio Test, exposed on
+  `TimeSeriesCharacteristics::regime` (analyzer)
+- Adaptive linear detrend in the prediction pipeline, gated on
+  `regime == Trending` and the absence of log-transform (predictor)
+- Direction-based metrics (`DirectionMetrics` with DirAcc, DirAcc
+  filtered, IC, calibration residual) and calibration buckets, wired
+  into `BacktestResult` and the reporter (bench)
+- `ForecastResult.predicted_std`, derived from the 10/90 quantile band
+  using `Z_SCORE_80_INTERVAL = 1.282` (predictor)
+- `bench::sweep` Cartesian-product evaluator with `run_sweep` driver,
+  per-worker `Predictor::new(1)` parallelism, deterministic row sort,
+  per-regime / per-series / cross-sectional-IC aggregates, CSV/JSON
+  output, JSON-fixture loader, and `predict_sweep` CLI binary (bench)
+
+### Changed
+
+- `DirectionMetrics.ic` is now `Option<f64>` to distinguish "zero
+  variance / no ranking signal" from "true zero correlation" (bench)
+- `default_calibration_buckets` outer ranges widened to ±1000% so
+  high-volatility meme-coin returns no longer drop silently (bench)
+- `bench` crate gains a `cli` feature (default-on) that gates the
+  CLI-only dependencies (clap, csv, serde_json, anyhow,
+  tracing-subscriber); library consumers may opt out with
+  `--no-default-features` (bench)
+
 ## [0.1.6] - 2026-03-30
 
 ### Added
