@@ -413,6 +413,7 @@ pub fn run_sweep(config: SweepConfig) -> SweepResult<SweepReport> {
 
     let regime_summary = crate::sweep::aggregate::aggregate_by_regime(&rows);
     let series_summary = crate::sweep::aggregate::aggregate_by_series(&rows);
+    let horizon_summary = crate::sweep::aggregate::aggregate_by_horizon(&rows);
     let (cross_sectional_ic_by_date, cross_sectional_ic_n) =
         crate::sweep::aggregate::cross_sectional_ic(&rows);
 
@@ -420,6 +421,7 @@ pub fn run_sweep(config: SweepConfig) -> SweepResult<SweepReport> {
         rows,
         regime_summary,
         series_summary,
+        horizon_summary,
         cross_sectional_ic_by_date,
         cross_sectional_ic_n,
     })

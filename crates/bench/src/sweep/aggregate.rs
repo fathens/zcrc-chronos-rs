@@ -16,7 +16,9 @@ use std::collections::BTreeMap;
 use chrono::NaiveDateTime;
 
 use crate::direction_metrics::spearman_correlation;
-use crate::sweep::{CROSS_SECTIONAL_MIN_N, RegimeStats, SeriesStats, SweepRow};
+use crate::sweep::{
+    CROSS_SECTIONAL_MIN_N, FLAT_RETURN_EPSILON, HorizonStats, RegimeStats, SeriesStats, SweepRow,
+};
 
 /// Bucket rows by regime label and compute the per-bucket averages
 /// reported on `SweepReport.regime_summary`. Rows without a regime label
@@ -66,6 +68,89 @@ pub fn aggregate_by_series(rows: &[SweepRow]) -> Vec<SeriesStats> {
             series_id,
         })
         .collect()
+}
+
+/// Bucket rows by `horizon_secs` and compute per-horizon diagnostics
+/// (flat rate, average IC, cross-sectional IC across all rows at that
+/// horizon, decile spread). Output is sorted by `horizon_secs` for stable
+/// serialisation.
+///
+/// The cross-sectional IC pools every row at the same horizon — across
+/// `eval_date`, `history_secs`, and `series_id` — so the result reflects
+/// directional skill at that horizon regardless of timing. Decile spread
+/// pools the same set.
+pub fn aggregate_by_horizon(rows: &[SweepRow]) -> Vec<HorizonStats> {
+    let mut by_horizon: BTreeMap<i64, Vec<&SweepRow>> = BTreeMap::new();
+    for row in rows {
+        by_horizon.entry(row.horizon_secs).or_default().push(row);
+    }
+    by_horizon
+        .into_iter()
+        .map(|(horizon_secs, group)| {
+            let n = group.len();
+            let flat_count = group
+                .iter()
+                .filter(|r| {
+                    r.final_pred_return
+                        .is_some_and(|p| p.is_finite() && p.abs() < FLAT_RETURN_EPSILON)
+                })
+                .count();
+
+            let pairs: Vec<(f64, f64)> = group
+                .iter()
+                .filter_map(|r| match (r.final_pred_return, r.final_actual_return) {
+                    (Some(p), Some(a)) if p.is_finite() && a.is_finite() => Some((p, a)),
+                    _ => None,
+                })
+                .collect();
+
+            let cross_sectional_n = pairs.len();
+            let cross_sectional_ic = if cross_sectional_n < CROSS_SECTIONAL_MIN_N {
+                None
+            } else {
+                let preds: Vec<f64> = pairs.iter().map(|(p, _)| *p).collect();
+                let actuals: Vec<f64> = pairs.iter().map(|(_, a)| *a).collect();
+                spearman_correlation(&preds, &actuals)
+            };
+
+            HorizonStats {
+                horizon_secs,
+                n,
+                flat_count,
+                avg_dir_acc: avg_finite(group.iter().filter_map(|r| r.dir_acc)),
+                avg_per_row_ic: avg_finite(group.iter().filter_map(|r| r.per_row_ic)),
+                cross_sectional_ic,
+                cross_sectional_n,
+                decile_spread: decile_spread(&pairs),
+            }
+        })
+        .collect()
+}
+
+/// Mean `actual` of the top predicted decile minus mean of the bottom
+/// decile. Pairs are sorted by `pred`; the highest 10 % and the lowest
+/// 10 % each provide at least one observation only when the input has at
+/// least ten finite-return rows. Returns `None` otherwise.
+fn decile_spread(pairs: &[(f64, f64)]) -> Option<f64> {
+    if pairs.len() < 10 {
+        return None;
+    }
+    let mut sorted = pairs.to_vec();
+    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // chunk size: ceil(n / 10) so the partition always produces a top and
+    // bottom slice with at least 1 element and at most ceil(n/10) each.
+    let chunk = sorted.len().div_ceil(10);
+    let bottom_mean = mean_of_actuals(&sorted[..chunk])?;
+    let top_mean = mean_of_actuals(&sorted[sorted.len() - chunk..])?;
+    Some(top_mean - bottom_mean)
+}
+
+fn mean_of_actuals(slice: &[(f64, f64)]) -> Option<f64> {
+    if slice.is_empty() {
+        return None;
+    }
+    let n = slice.len() as f64;
+    Some(slice.iter().map(|(_, a)| *a).sum::<f64>() / n)
 }
 
 /// Compute Spearman rank correlation between `final_pred_return` and
@@ -251,6 +336,116 @@ mod tests {
         }
         let (_, n) = cross_sectional_ic(&rows);
         assert_eq!(n[&ts(0)], CROSS_SECTIONAL_MIN_N - 1);
+    }
+
+    #[test]
+    fn aggregate_by_horizon_counts_flat_predictions() {
+        let mut rows = Vec::new();
+        for i in 0..12 {
+            let mut r = base_row(&format!("S{i}"), ts(0), "Trending");
+            r.horizon_secs = 168 * 3600;
+            // First 9 rows are flat (< FLAT_RETURN_EPSILON), last 3 are
+            // strongly directional.
+            r.final_pred_return = Some(if i < 9 { 1e-10 } else { 0.1 + i as f64 * 0.01 });
+            r.final_actual_return = Some(0.02 * (i as f64 - 6.0));
+            rows.push(r);
+        }
+        let agg = aggregate_by_horizon(&rows);
+        assert_eq!(agg.len(), 1);
+        let h = &agg[0];
+        assert_eq!(h.horizon_secs, 168 * 3600);
+        assert_eq!(h.n, 12);
+        assert_eq!(h.flat_count, 9);
+    }
+
+    #[test]
+    fn aggregate_by_horizon_partitions_by_horizon() {
+        let mut rows = Vec::new();
+        for i in 0..3 {
+            let mut r = base_row(&format!("S{i}"), ts(0), "Trending");
+            r.horizon_secs = 24 * 3600;
+            r.final_pred_return = Some(i as f64);
+            r.final_actual_return = Some(i as f64);
+            rows.push(r);
+        }
+        for i in 0..2 {
+            let mut r = base_row(&format!("L{i}"), ts(0), "Trending");
+            r.horizon_secs = 168 * 3600;
+            r.final_pred_return = Some(i as f64);
+            r.final_actual_return = Some(i as f64);
+            rows.push(r);
+        }
+        let agg = aggregate_by_horizon(&rows);
+        assert_eq!(agg.len(), 2);
+        // Sorted ascending by horizon_secs.
+        assert_eq!(agg[0].horizon_secs, 24 * 3600);
+        assert_eq!(agg[0].n, 3);
+        assert_eq!(agg[1].horizon_secs, 168 * 3600);
+        assert_eq!(agg[1].n, 2);
+    }
+
+    #[test]
+    fn aggregate_by_horizon_cross_sectional_ic_requires_min_n() {
+        let mut rows = Vec::new();
+        for i in 0..(CROSS_SECTIONAL_MIN_N - 1) {
+            let mut r = base_row(&format!("S{i}"), ts(0), "Trending");
+            r.horizon_secs = 24 * 3600;
+            r.final_pred_return = Some(i as f64);
+            r.final_actual_return = Some(i as f64);
+            rows.push(r);
+        }
+        let agg = aggregate_by_horizon(&rows);
+        assert_eq!(agg[0].cross_sectional_n, CROSS_SECTIONAL_MIN_N - 1);
+        assert_eq!(agg[0].cross_sectional_ic, None);
+    }
+
+    #[test]
+    fn aggregate_by_horizon_cross_sectional_ic_computes_perfect_corr() {
+        let mut rows = Vec::new();
+        for i in 0..CROSS_SECTIONAL_MIN_N {
+            let mut r = base_row(&format!("S{i}"), ts(0), "Trending");
+            r.horizon_secs = 24 * 3600;
+            r.final_pred_return = Some(i as f64);
+            r.final_actual_return = Some(i as f64);
+            rows.push(r);
+        }
+        let agg = aggregate_by_horizon(&rows);
+        let ic = agg[0]
+            .cross_sectional_ic
+            .expect("ic computable above threshold");
+        assert!((ic - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn aggregate_by_horizon_decile_spread_captures_inversion() {
+        // 20 rows: predictions ascending, actuals descending → perfect
+        // inverse. Top-decile mean actual should be very negative, bottom
+        // very positive, so spread is strongly negative.
+        let mut rows = Vec::new();
+        for i in 0..20 {
+            let mut r = base_row(&format!("S{i}"), ts(0), "Trending");
+            r.horizon_secs = 168 * 3600;
+            r.final_pred_return = Some(i as f64);
+            r.final_actual_return = Some(-(i as f64));
+            rows.push(r);
+        }
+        let agg = aggregate_by_horizon(&rows);
+        let spread = agg[0].decile_spread.expect("spread computable");
+        assert!(spread < 0.0, "expected negative spread, got {spread}");
+    }
+
+    #[test]
+    fn aggregate_by_horizon_decile_spread_none_below_ten_rows() {
+        let mut rows = Vec::new();
+        for i in 0..9 {
+            let mut r = base_row(&format!("S{i}"), ts(0), "Trending");
+            r.horizon_secs = 24 * 3600;
+            r.final_pred_return = Some(i as f64);
+            r.final_actual_return = Some(i as f64);
+            rows.push(r);
+        }
+        let agg = aggregate_by_horizon(&rows);
+        assert_eq!(agg[0].decile_spread, None);
     }
 
     #[test]

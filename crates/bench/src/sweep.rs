@@ -202,12 +202,49 @@ pub struct SeriesStats {
     pub avg_per_row_ic: Option<f64>,
 }
 
+/// Aggregate stats per `horizon_secs`, computed by
+/// `aggregate_by_horizon`. Surfaces the three signals that the zaciraci
+/// 168 h evaluation flagged: flat-prediction rate, cross-sectional IC,
+/// and decile spread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HorizonStats {
+    pub horizon_secs: i64,
+    pub n: usize,
+    /// Number of rows whose predicted return magnitude is below
+    /// [`FLAT_RETURN_EPSILON`]. Divide by `n` to get the flat-prediction
+    /// rate (a proxy for over-damping when it climbs into the 80 % range
+    /// at the production horizon).
+    pub flat_count: usize,
+    pub avg_dir_acc: Option<f64>,
+    pub avg_per_row_ic: Option<f64>,
+    /// Cross-sectional Spearman correlation of `final_pred_return` vs
+    /// `final_actual_return` across every row at this horizon. `None`
+    /// when fewer than [`CROSS_SECTIONAL_MIN_N`] rows have both returns
+    /// finite or when one of the series has zero variance.
+    pub cross_sectional_ic: Option<f64>,
+    /// Number of rows that contributed to `cross_sectional_ic`.
+    pub cross_sectional_n: usize,
+    /// Mean `final_actual_return` of the top predicted-return decile
+    /// minus the mean of the bottom decile. Captures the
+    /// "predict-up-but-actually-down" pathology when negative. `None`
+    /// when fewer than 10 rows have both returns finite.
+    pub decile_spread: Option<f64>,
+}
+
+/// Threshold below which a predicted return is treated as "flat" for
+/// the [`HorizonStats::flat_count`] tally. Matches the threshold used
+/// by zaciraci's predict_sweep evaluation.
+pub const FLAT_RETURN_EPSILON: f64 = 1e-7;
+
 /// Result of a sweep run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SweepReport {
     pub rows: Vec<SweepRow>,
     pub regime_summary: Vec<RegimeStats>,
     pub series_summary: Vec<SeriesStats>,
+    /// Per-horizon summary: flat rate, average IC, cross-sectional IC,
+    /// and decile spread. Populated by `aggregate_by_horizon`.
+    pub horizon_summary: Vec<HorizonStats>,
     /// Cross-sectional Spearman correlation of predicted vs actual return
     /// across all series for a single `eval_date`. Keyed by `eval_date`.
     /// `None` when fewer than `cross_sectional_min_n` series contributed or
@@ -266,7 +303,9 @@ pub mod output;
 pub mod runner;
 pub mod safety;
 
-pub use aggregate::{aggregate_by_regime, aggregate_by_series, cross_sectional_ic};
+pub use aggregate::{
+    aggregate_by_horizon, aggregate_by_regime, aggregate_by_series, cross_sectional_ic,
+};
 pub use runner::{JobSpec, MIN_TRAIN_SAMPLES, run_one, run_sweep};
 
 #[cfg(test)]

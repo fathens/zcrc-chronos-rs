@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-worker `Predictor::new(1)` parallelism, deterministic row sort,
   per-regime / per-series / cross-sectional-IC aggregates, CSV/JSON
   output, JSON-fixture loader, and `predict_sweep` CLI binary (bench)
+- Per-horizon sweep aggregation (`HorizonStats`, `aggregate_by_horizon`):
+  flat-prediction count, average DirAcc / per-row IC, cross-sectional
+  IC across the rows at each horizon, and decile spread of actual
+  returns ranked by predicted returns (bench)
 
 ### Changed
 

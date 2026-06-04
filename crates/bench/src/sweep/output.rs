@@ -160,6 +160,7 @@ mod tests {
             rows: vec![populated_row()],
             regime_summary: vec![],
             series_summary: vec![],
+            horizon_summary: vec![],
             cross_sectional_ic_by_date: Default::default(),
             cross_sectional_ic_n: Default::default(),
         };
