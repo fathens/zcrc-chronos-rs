@@ -4,7 +4,8 @@ use std::sync::LazyLock;
 use analyzer::TimeSeriesAnalyzer;
 use chrono::{NaiveDateTime, TimeDelta};
 use common::{
-    BigDecimal, ChronosError, Result, TimeSeriesRegime, decimals_to_f64s, f64s_to_decimals,
+    BigDecimal, ChronosError, Result, TimeSeriesCharacteristics, TimeSeriesRegime,
+    decimals_to_f64s, f64s_to_decimals,
 };
 use normalize::normalize_time_series_data;
 use selector::AdaptiveModelSelector;
@@ -27,6 +28,26 @@ pub struct PredictionInput {
 /// Used to derive `predicted_std` from the quantile band as
 /// `(upper - lower) / (2 * Z_SCORE_80_INTERVAL)`.
 pub(crate) const Z_SCORE_80_INTERVAL: f64 = 1.281_551_565_544_6;
+
+/// Minimum span_ratio (= `|slope| × (n − 1) / |current_price|`) required
+/// to apply the linear detrend pre-processor. The ratio expresses the
+/// relative price change that the linear trend implies over the full
+/// training window — at 0.15, the trend would account for ≥15 % of the
+/// current price.
+///
+/// Calibrated against an empirical sweep of 271 NEAR tokens (`improve.md`,
+/// 2026-06-04 verification): θ = 0.15 cleanly excludes stable / bridged
+/// tokens (whose autocorrelation-significant drifts look "Trending" to the
+/// Variance Ratio Test but carry essentially no economic trend) while still
+/// catching the strong-trend periods of the trending winners that motivated
+/// detrend in the first place.
+pub(crate) const DETREND_SPAN_RATIO_THRESHOLD: f64 = 0.15;
+
+/// Floor on `|current_price|` used as the denominator of the span_ratio
+/// gate. Anything below this is treated as an unreliable baseline — for
+/// price series that have collapsed close to zero we keep the raw forecast
+/// rather than risk dividing by a near-singular value.
+const DETREND_PRICE_FLOOR: f64 = 1e-150;
 
 /// Full result of a prediction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,30 +172,19 @@ impl Predictor {
             (norm_values.clone(), false)
         };
 
-        // Step 2.6: Apply linear detrend if the series is significantly trending.
-        // This is gated on the Variance Ratio Test regime — only applied when the
-        // series shows persistent autocorrelation (not on random walks), avoiding
-        // the false-trend extrapolation that hurts random walk tokens.
-        // Skipped when log transform was applied, since log transform already
-        // compresses exponential trends.
-        let detrend_state =
-            if !log_transformed && characteristics.regime.regime == TimeSeriesRegime::Trending {
-                let slope = characteristics.trend.slope;
-                let intercept = characteristics.trend.intercept;
-                info!(
-                    slope = format!("{:.6}", slope),
-                    intercept = format!("{:.6}", intercept),
-                    vr = format!("{:.4}", characteristics.regime.variance_ratio),
-                    "Trending regime detected, applying linear detrend"
-                );
-                Some(DetrendState {
-                    slope,
-                    intercept,
-                    training_len: log_values.len(),
-                })
-            } else {
-                None
-            };
+        // Step 2.6: Apply linear detrend when the linear trend would account
+        // for ≥`DETREND_SPAN_RATIO_THRESHOLD` of the current price over the
+        // training window. Autocorrelation-based regime detection (Variance
+        // Ratio Test) cannot tell economically meaningful trend from a
+        // mean-reverting series with weak persistent drift — the latter
+        // includes stable / bridged crypto tokens that look "Trending" to
+        // the test but should not be detrended.
+        //
+        // VR test is used as a negative filter only: a series that is
+        // statistically MeanReverting will not be detrended regardless of
+        // its slope. Log-transformed series skip the gate because the log
+        // already compresses exponential trends.
+        let detrend_state = compute_detrend_state(&characteristics, &log_values, log_transformed);
 
         let train_values: Vec<f64> = if let Some(ref state) = detrend_state {
             log_values
@@ -348,6 +358,53 @@ struct DetrendState {
     intercept: f64,
     /// Number of training samples (the index where forecasting begins).
     training_len: usize,
+}
+
+/// Decide whether to apply the linear detrend pre-processor and return the
+/// captured state when it is applied. See [`DETREND_SPAN_RATIO_THRESHOLD`]
+/// for the rationale behind the slope-magnitude gate.
+fn compute_detrend_state(
+    characteristics: &TimeSeriesCharacteristics,
+    log_values: &[f64],
+    log_transformed: bool,
+) -> Option<DetrendState> {
+    if log_transformed || log_values.is_empty() {
+        return None;
+    }
+    if characteristics.regime.regime == TimeSeriesRegime::MeanReverting {
+        // VR test is used as a negative filter: never inject a trend into a
+        // series that is statistically mean-reverting.
+        return None;
+    }
+    let slope = characteristics.trend.slope;
+    let intercept = characteristics.trend.intercept;
+    if !slope.is_finite() || !intercept.is_finite() {
+        return None;
+    }
+    let current_price = *log_values
+        .last()
+        .expect("log_values checked non-empty above");
+    if !current_price.is_finite() || current_price.abs() < DETREND_PRICE_FLOOR {
+        return None;
+    }
+    let span = slope.abs() * (log_values.len() - 1) as f64;
+    let span_ratio = span / current_price.abs();
+    if span_ratio <= DETREND_SPAN_RATIO_THRESHOLD {
+        return None;
+    }
+    info!(
+        slope = format!("{slope:.6}"),
+        intercept = format!("{intercept:.6}"),
+        span_ratio = format!("{span_ratio:.4}"),
+        vr = format!("{:.4}", characteristics.regime.variance_ratio),
+        regime = ?characteristics.regime.regime,
+        "span_ratio above threshold, applying linear detrend"
+    );
+    Some(DetrendState {
+        slope,
+        intercept,
+        training_len: log_values.len(),
+    })
 }
 
 /// Add the linear trend back to a forecast vector. Forecast step i (0-indexed)

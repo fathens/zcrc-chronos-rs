@@ -93,8 +93,9 @@ fn test_predict_flat() {
 
 #[test]
 fn test_predict_random_walk_no_detrend() {
-    // Pseudo-random walk: the values drift but with no significant linear trend.
-    // The VR test should classify this as RandomWalk (not Trending), so detrend
+    // Pseudo-random walk: the values drift but with no significant linear
+    // trend. The span_ratio gate (|slope| × (n − 1) / |current_price|)
+    // should stay well below DETREND_SPAN_RATIO_THRESHOLD here, so detrend
     // is not applied and the forecast stays near the last observed value
     // rather than extrapolating a spurious trend.
     let mut rng_state: u64 = 12345;
@@ -130,6 +131,103 @@ fn test_predict_random_walk_no_detrend() {
         "Random walk forecast drifted too far: last_observed={}, last_forecast={}",
         last_observed,
         last_forecast
+    );
+}
+
+#[test]
+fn test_compute_detrend_state_gates_on_span_ratio() {
+    use common::{RegimeInfo, TimeSeriesCharacteristics, TimeSeriesRegime, TrendInfo};
+
+    fn chars(slope: f64, intercept: f64, regime: TimeSeriesRegime) -> TimeSeriesCharacteristics {
+        TimeSeriesCharacteristics {
+            trend: TrendInfo {
+                slope,
+                intercept,
+                ..Default::default()
+            },
+            regime: RegimeInfo {
+                regime,
+                variance_ratio: 1.0,
+                z_statistic: 0.0,
+                p_value: 1.0,
+                lag: 2,
+            },
+            ..Default::default()
+        }
+    }
+
+    // 100 samples, current_price = 298, slope = 2.0
+    // → span_ratio = |2.0| * 99 / 298 ≈ 0.665, well above 0.15 → detrend.
+    let values: Vec<f64> = (0..100).map(|i| 100.0 + 2.0 * i as f64).collect();
+    let state = compute_detrend_state(
+        &chars(2.0, 100.0, TimeSeriesRegime::Trending),
+        &values,
+        false,
+    )
+    .expect("strong-trend series should be detrended");
+    assert_eq!(state.training_len, 100);
+    assert!((state.slope - 2.0).abs() < 1e-12);
+
+    // Same series but tagged as MeanReverting: VR test is a negative
+    // filter, so detrend must be skipped regardless of slope.
+    assert!(
+        compute_detrend_state(
+            &chars(2.0, 100.0, TimeSeriesRegime::MeanReverting),
+            &values,
+            false,
+        )
+        .is_none(),
+        "MeanReverting series must not be detrended even with a large slope"
+    );
+
+    // Weak-drift stable-like series: slope = 0.001, current ≈ 1.099
+    // → span_ratio = 0.001 * 99 / 1.099 ≈ 0.09 < 0.15 → no detrend.
+    let stable: Vec<f64> = (0..100).map(|i| 1.0 + 0.001 * i as f64).collect();
+    assert!(
+        compute_detrend_state(
+            &chars(0.001, 1.0, TimeSeriesRegime::Trending),
+            &stable,
+            false,
+        )
+        .is_none(),
+        "weak-drift series must not be detrended even when VR says Trending"
+    );
+
+    // Log-transformed series always skips detrend.
+    assert!(
+        compute_detrend_state(
+            &chars(2.0, 100.0, TimeSeriesRegime::Trending),
+            &values,
+            true,
+        )
+        .is_none(),
+        "log-transformed series must skip detrend"
+    );
+
+    // Degenerate / non-finite inputs are rejected without panicking.
+    assert!(
+        compute_detrend_state(
+            &chars(f64::NAN, 100.0, TimeSeriesRegime::Trending),
+            &values,
+            false,
+        )
+        .is_none(),
+        "NaN slope must be rejected"
+    );
+    assert!(
+        compute_detrend_state(&chars(2.0, 100.0, TimeSeriesRegime::Trending), &[], false,)
+            .is_none(),
+        "empty log_values must be rejected"
+    );
+    let near_zero = vec![1e-200; 50];
+    assert!(
+        compute_detrend_state(
+            &chars(2.0, 100.0, TimeSeriesRegime::Trending),
+            &near_zero,
+            false,
+        )
+        .is_none(),
+        "near-zero baseline must be rejected"
     );
 }
 

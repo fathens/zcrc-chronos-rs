@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Adaptive detrend gate switched from the Variance Ratio Test regime
+  to a slope-magnitude (span_ratio) gate: detrend is now applied only
+  when `|slope| × (n − 1) / |current_price| > 0.15`, with the VR test
+  retained as a negative filter (never detrend a MeanReverting series).
+  Calibrated against empirical sweeps of NEAR tokens where the VR test
+  misclassified stable / bridged tokens with weak persistent drift as
+  Trending (predictor)
 - `DirectionMetrics.ic` is now `Option<f64>` to distinguish "zero
   variance / no ranking signal" from "true zero correlation" (bench)
 - `default_calibration_buckets` outer ranges widened to ±1000% so
