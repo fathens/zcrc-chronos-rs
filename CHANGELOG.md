@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `TimeSeriesAnalyzer::detect_seasonality` no longer reports a numeric
+  `period` when the spectral peak is classified as "weak" (score ≤
+  0.1). The FFT always returns *some* peak on white-noise data, and
+  forwarding that spurious period through `TrainingHints` sent
+  EtsModel down the seasonal Holt-Winters path. HW fits trend ≈ 0
+  with near-constant seasonal indices on noise, collapsing
+  multi-step forecasts to a flat line. This was the root cause of the
+  production "168h flat 79 %" pathology observed downstream, even
+  though every individual model produced a non-flat forecast in
+  isolation. The "flat" and "outlier" fixtures in the
+  `analyzer_output.json` golden now report `period: null` to match
+  (analyzer)
+
 ### Added
 
 - Regime detection via Lo-MacKinlay Variance Ratio Test, exposed on
