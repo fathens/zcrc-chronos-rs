@@ -54,6 +54,25 @@ fn test_predict_uptrend() {
     for i in 1..timestamps.len() {
         assert!(timestamps[i] > timestamps[i - 1]);
     }
+
+    // make_data(100) is y = 100 + 2*i for i in 0..99 (Trending regime).
+    // The forecast should preserve the linear trend, so values at i=100..109
+    // should be approximately 300, 302, ..., 318. Each value should be > the
+    // last training value (298) and trending upward.
+    let forecast_values: Vec<f64> = result
+        .forecast_values
+        .values()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+    assert!(
+        forecast_values[0] > 290.0,
+        "First forecast should be near 300 (trend extrapolation), got {}",
+        forecast_values[0]
+    );
+    assert!(
+        forecast_values.last().copied().unwrap() > forecast_values[0],
+        "Forecast should continue the uptrend"
+    );
 }
 
 #[test]
@@ -70,6 +89,146 @@ fn test_predict_flat() {
         let f = v.to_f64().unwrap();
         assert!((f - 42.0).abs() < 20.0, "Expected ~42, got {}", f);
     }
+}
+
+#[test]
+fn test_predict_random_walk_no_detrend() {
+    // Pseudo-random walk: the values drift but with no significant linear
+    // trend. The span_ratio gate (|slope| × (n − 1) / |current_price|)
+    // should stay well below DETREND_SPAN_RATIO_THRESHOLD here, so detrend
+    // is not applied and the forecast stays near the last observed value
+    // rather than extrapolating a spurious trend.
+    let mut rng_state: u64 = 12345;
+    let mut price = 100.0;
+    let values: Vec<f64> = (0..200)
+        .map(|_| {
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let u = (rng_state >> 33) as f64 / (1u64 << 31) as f64;
+            price += (u - 0.5) * 0.5;
+            price
+        })
+        .collect();
+    let last_observed = values[values.len() - 1];
+
+    let input = PredictionInput {
+        data: make_data_with_values(&values),
+        horizon: TimeDelta::hours(10),
+    };
+
+    let result = predict(&input).unwrap();
+    let forecast_values: Vec<f64> = result
+        .forecast_values
+        .values()
+        .map(|v| v.to_f64().unwrap())
+        .collect();
+
+    // For a random walk, the forecast should stay close to the last observed
+    // value rather than extrapolating a trend. Allow a generous tolerance
+    // since the underlying models do produce some drift.
+    let last_forecast = forecast_values.last().copied().unwrap();
+    assert!(
+        (last_forecast - last_observed).abs() < 5.0,
+        "Random walk forecast drifted too far: last_observed={}, last_forecast={}",
+        last_observed,
+        last_forecast
+    );
+}
+
+#[test]
+fn test_compute_detrend_state_gates_on_span_ratio() {
+    use common::{RegimeInfo, TimeSeriesCharacteristics, TimeSeriesRegime, TrendInfo};
+
+    fn chars(slope: f64, intercept: f64, regime: TimeSeriesRegime) -> TimeSeriesCharacteristics {
+        TimeSeriesCharacteristics {
+            trend: TrendInfo {
+                slope,
+                intercept,
+                ..Default::default()
+            },
+            regime: RegimeInfo {
+                regime,
+                variance_ratio: 1.0,
+                z_statistic: 0.0,
+                p_value: 1.0,
+                lag: 2,
+            },
+            ..Default::default()
+        }
+    }
+
+    // 100 samples, current_price = 298, slope = 2.0
+    // → span_ratio = |2.0| * 99 / 298 ≈ 0.665, well above 0.15 → detrend.
+    let values: Vec<f64> = (0..100).map(|i| 100.0 + 2.0 * i as f64).collect();
+    let state = compute_detrend_state(
+        &chars(2.0, 100.0, TimeSeriesRegime::Trending),
+        &values,
+        false,
+    )
+    .expect("strong-trend series should be detrended");
+    assert_eq!(state.training_len, 100);
+    assert!((state.slope - 2.0).abs() < 1e-12);
+
+    // Same series but tagged as MeanReverting: VR test is a negative
+    // filter, so detrend must be skipped regardless of slope.
+    assert!(
+        compute_detrend_state(
+            &chars(2.0, 100.0, TimeSeriesRegime::MeanReverting),
+            &values,
+            false,
+        )
+        .is_none(),
+        "MeanReverting series must not be detrended even with a large slope"
+    );
+
+    // Weak-drift stable-like series: slope = 0.001, current ≈ 1.099
+    // → span_ratio = 0.001 * 99 / 1.099 ≈ 0.09 < 0.15 → no detrend.
+    let stable: Vec<f64> = (0..100).map(|i| 1.0 + 0.001 * i as f64).collect();
+    assert!(
+        compute_detrend_state(
+            &chars(0.001, 1.0, TimeSeriesRegime::Trending),
+            &stable,
+            false,
+        )
+        .is_none(),
+        "weak-drift series must not be detrended even when VR says Trending"
+    );
+
+    // Log-transformed series always skips detrend.
+    assert!(
+        compute_detrend_state(
+            &chars(2.0, 100.0, TimeSeriesRegime::Trending),
+            &values,
+            true,
+        )
+        .is_none(),
+        "log-transformed series must skip detrend"
+    );
+
+    // Degenerate / non-finite inputs are rejected without panicking.
+    assert!(
+        compute_detrend_state(
+            &chars(f64::NAN, 100.0, TimeSeriesRegime::Trending),
+            &values,
+            false,
+        )
+        .is_none(),
+        "NaN slope must be rejected"
+    );
+    assert!(
+        compute_detrend_state(&chars(2.0, 100.0, TimeSeriesRegime::Trending), &[], false,)
+            .is_none(),
+        "empty log_values must be rejected"
+    );
+    let near_zero = vec![1e-200; 50];
+    assert!(
+        compute_detrend_state(
+            &chars(2.0, 100.0, TimeSeriesRegime::Trending),
+            &near_zero,
+            false,
+        )
+        .is_none(),
+        "near-zero baseline must be rejected"
+    );
 }
 
 #[test]
@@ -350,6 +509,42 @@ fn test_forecast_result_has_correct_timestamps() {
         for ts in upper.keys() {
             assert!(result.forecast_values.contains_key(ts));
         }
+    }
+}
+
+#[test]
+fn test_predicted_std_matches_quantile_band() {
+    // predicted_std must satisfy the contract
+    //   std[t] ≈ (upper[t] - lower[t]) / (2 * Z_SCORE_80_INTERVAL)
+    // whenever both bounds are present.
+    let data = make_data(120);
+    let input = PredictionInput {
+        data,
+        horizon: TimeDelta::hours(8),
+    };
+    let result = predict(&input).unwrap();
+
+    // If the strategy emits no quantile bands the contract is vacuously
+    // satisfied (predicted_std must also be None). Skip the inverse check.
+    let (Some(lower), Some(upper), Some(std)) = (
+        result.lower_bound.as_ref(),
+        result.upper_bound.as_ref(),
+        result.predicted_std.as_ref(),
+    ) else {
+        assert!(result.predicted_std.is_none());
+        return;
+    };
+
+    assert_eq!(std.len(), result.forecast_values.len());
+    for (ts, std_value) in std {
+        let lo = lower.get(ts).expect("lower bound missing for std ts");
+        let hi = upper.get(ts).expect("upper bound missing for std ts");
+        let lo_f = lo.to_f64().unwrap();
+        let hi_f = hi.to_f64().unwrap();
+        let expected = ((hi_f - lo_f) / (2.0 * Z_SCORE_80_INTERVAL)).max(0.0);
+        let actual = std_value.to_f64().unwrap();
+        assert!(actual >= 0.0, "predicted_std must be non-negative");
+        assert_relative_eq!(actual, expected, max_relative = 1e-9, epsilon = 1e-9);
     }
 }
 

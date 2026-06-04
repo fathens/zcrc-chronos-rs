@@ -3,7 +3,10 @@ use std::sync::LazyLock;
 
 use analyzer::TimeSeriesAnalyzer;
 use chrono::{NaiveDateTime, TimeDelta};
-use common::{BigDecimal, ChronosError, Result, decimals_to_f64s, f64s_to_decimals};
+use common::{
+    BigDecimal, ChronosError, Result, TimeSeriesCharacteristics, TimeSeriesRegime,
+    decimals_to_f64s, f64s_to_decimals,
+};
 use normalize::normalize_time_series_data;
 use selector::AdaptiveModelSelector;
 use serde::{Deserialize, Serialize};
@@ -21,6 +24,31 @@ pub struct PredictionInput {
     pub horizon: TimeDelta,
 }
 
+/// Z-score for the 80% prediction interval (10th / 90th percentiles).
+/// Used to derive `predicted_std` from the quantile band as
+/// `(upper - lower) / (2 * Z_SCORE_80_INTERVAL)`.
+pub(crate) const Z_SCORE_80_INTERVAL: f64 = 1.281_551_565_544_6;
+
+/// Minimum span_ratio (= `|slope| × (n − 1) / |current_price|`) required
+/// to apply the linear detrend pre-processor. The ratio expresses the
+/// relative price change that the linear trend implies over the full
+/// training window — at 0.15, the trend would account for ≥15 % of the
+/// current price.
+///
+/// Calibrated against an empirical sweep of 271 NEAR tokens (`improve.md`,
+/// 2026-06-04 verification): θ = 0.15 cleanly excludes stable / bridged
+/// tokens (whose autocorrelation-significant drifts look "Trending" to the
+/// Variance Ratio Test but carry essentially no economic trend) while still
+/// catching the strong-trend periods of the trending winners that motivated
+/// detrend in the first place.
+pub(crate) const DETREND_SPAN_RATIO_THRESHOLD: f64 = 0.15;
+
+/// Floor on `|current_price|` used as the denominator of the span_ratio
+/// gate. Anything below this is treated as an unreliable baseline — for
+/// price series that have collapsed close to zero we keep the raw forecast
+/// rather than risk dividing by a near-singular value.
+const DETREND_PRICE_FLOOR: f64 = 1e-150;
+
 /// Full result of a prediction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForecastResult {
@@ -30,6 +58,13 @@ pub struct ForecastResult {
     pub lower_bound: Option<BTreeMap<NaiveDateTime, BigDecimal>>,
     /// Upper confidence bound (90th percentile) with timestamps.
     pub upper_bound: Option<BTreeMap<NaiveDateTime, BigDecimal>>,
+    /// Approximated per-step predicted standard deviation in the original
+    /// (output) scale, derived from the 10/90 quantile band as
+    /// `(upper - lower) / (2 * Z_SCORE_80_INTERVAL)`. Assumes the band is
+    /// approximately Gaussian; for log-transformed series this is a
+    /// first-order approximation in the exponentiated domain. `None` when
+    /// either quantile bound is unavailable.
+    pub predicted_std: Option<BTreeMap<NaiveDateTime, BigDecimal>>,
     /// Name of model(s) used.
     pub model_name: String,
     /// Strategy selected.
@@ -122,7 +157,7 @@ impl Predictor {
         let is_exponential = characteristics.trend.is_exponential;
 
         // Step 2.5: Apply log transform if exponential trend detected
-        let (train_values, log_transformed) = if is_exponential {
+        let (log_values, log_transformed) = if is_exponential {
             if norm_values.iter().all(|&v| v > 0.0) {
                 info!("Exponential trend detected, applying log transform");
                 let log_vals: Vec<f64> = norm_values.iter().map(|v| v.ln()).collect();
@@ -135,6 +170,30 @@ impl Predictor {
             }
         } else {
             (norm_values.clone(), false)
+        };
+
+        // Step 2.6: Apply linear detrend when the linear trend would account
+        // for ≥`DETREND_SPAN_RATIO_THRESHOLD` of the current price over the
+        // training window. Autocorrelation-based regime detection (Variance
+        // Ratio Test) cannot tell economically meaningful trend from a
+        // mean-reverting series with weak persistent drift — the latter
+        // includes stable / bridged crypto tokens that look "Trending" to
+        // the test but should not be detrended.
+        //
+        // VR test is used as a negative filter only: a series that is
+        // statistically MeanReverting will not be detrended regardless of
+        // its slope. Log-transformed series skip the gate because the log
+        // already compresses exponential trends.
+        let detrend_state = compute_detrend_state(&characteristics, &log_values, log_transformed);
+
+        let train_values: Vec<f64> = if let Some(ref state) = detrend_state {
+            log_values
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| v - (state.slope * i as f64 + state.intercept))
+                .collect()
+        } else {
+            log_values
         };
 
         // Step 3: Select strategy from pre-computed characteristics
@@ -186,27 +245,33 @@ impl Predictor {
 
         // --- Phase 3: Post-training (calling thread) ---
 
-        // Step 5: Inverse transform if log was applied
+        // Step 5a: Add the linear trend back to the forecast if detrend was applied.
+        // Forecast step i corresponds to original index (training_len + i).
+        let mean_after_trend = add_trend_if_detrended(forecast.mean, &detrend_state);
+        let lower_after_trend = forecast
+            .lower_quantile
+            .map(|v| add_trend_if_detrended(v, &detrend_state));
+        let upper_after_trend = forecast
+            .upper_quantile
+            .map(|v| add_trend_if_detrended(v, &detrend_state));
+
+        // Step 5b: Inverse transform if log was applied
         let final_mean: Vec<f64> = if log_transformed {
-            forecast.mean.iter().copied().map(safe_exp).collect()
+            mean_after_trend.iter().copied().map(safe_exp).collect()
         } else {
-            forecast.mean
+            mean_after_trend
         };
 
         let final_lower: Option<Vec<f64>> = if log_transformed {
-            forecast
-                .lower_quantile
-                .map(|v| v.iter().copied().map(safe_exp).collect())
+            lower_after_trend.map(|v| v.iter().copied().map(safe_exp).collect())
         } else {
-            forecast.lower_quantile
+            lower_after_trend
         };
 
         let final_upper: Option<Vec<f64>> = if log_transformed {
-            forecast
-                .upper_quantile
-                .map(|v| v.iter().copied().map(safe_exp).collect())
+            upper_after_trend.map(|v| v.iter().copied().map(safe_exp).collect())
         } else {
-            forecast.upper_quantile
+            upper_after_trend
         };
 
         let processing_time = start.elapsed().as_secs_f64();
@@ -215,6 +280,7 @@ impl Predictor {
             strategy = %strategy_name,
             models = metadata.model_count,
             log_transformed = log_transformed,
+            detrended = detrend_state.is_some(),
             time_secs = processing_time,
             "Prediction pipeline complete"
         );
@@ -228,8 +294,9 @@ impl Predictor {
             .collect();
 
         let lower_bound = final_lower
+            .as_ref()
             .map(|v| {
-                f64s_to_decimals(&v).map(|decimals| {
+                f64s_to_decimals(v).map(|decimals| {
                     forecast_timestamps
                         .iter()
                         .zip(decimals.into_iter())
@@ -240,8 +307,9 @@ impl Predictor {
             .transpose()?;
 
         let upper_bound = final_upper
+            .as_ref()
             .map(|v| {
-                f64s_to_decimals(&v).map(|decimals| {
+                f64s_to_decimals(v).map(|decimals| {
                     forecast_timestamps
                         .iter()
                         .zip(decimals.into_iter())
@@ -251,15 +319,104 @@ impl Predictor {
             })
             .transpose()?;
 
+        let predicted_std = match (final_lower.as_ref(), final_upper.as_ref()) {
+            (Some(lo), Some(hi)) if lo.len() == hi.len() => {
+                let std_values: Vec<f64> = lo
+                    .iter()
+                    .zip(hi.iter())
+                    .map(|(l, u)| ((u - l) / (2.0 * Z_SCORE_80_INTERVAL)).max(0.0))
+                    .collect();
+                let decimals = f64s_to_decimals(&std_values)?;
+                let map: BTreeMap<NaiveDateTime, BigDecimal> = forecast_timestamps
+                    .iter()
+                    .zip(decimals)
+                    .map(|(ts, val)| (*ts, val))
+                    .collect();
+                Some(map)
+            }
+            _ => None,
+        };
+
         Ok(ForecastResult {
             forecast_values,
             lower_bound,
             upper_bound,
+            predicted_std,
             model_name: forecast.model_name,
             strategy_name,
             processing_time_secs: processing_time,
             model_count: metadata.model_count,
         })
+    }
+}
+
+/// State captured when linear detrend is applied, used to re-add the trend
+/// to the forecast in post-processing.
+#[derive(Debug, Clone)]
+struct DetrendState {
+    slope: f64,
+    intercept: f64,
+    /// Number of training samples (the index where forecasting begins).
+    training_len: usize,
+}
+
+/// Decide whether to apply the linear detrend pre-processor and return the
+/// captured state when it is applied. See [`DETREND_SPAN_RATIO_THRESHOLD`]
+/// for the rationale behind the slope-magnitude gate.
+fn compute_detrend_state(
+    characteristics: &TimeSeriesCharacteristics,
+    log_values: &[f64],
+    log_transformed: bool,
+) -> Option<DetrendState> {
+    if log_transformed || log_values.is_empty() {
+        return None;
+    }
+    if characteristics.regime.regime == TimeSeriesRegime::MeanReverting {
+        // VR test is used as a negative filter: never inject a trend into a
+        // series that is statistically mean-reverting.
+        return None;
+    }
+    let slope = characteristics.trend.slope;
+    let intercept = characteristics.trend.intercept;
+    if !slope.is_finite() || !intercept.is_finite() {
+        return None;
+    }
+    let current_price = *log_values
+        .last()
+        .expect("log_values checked non-empty above");
+    if !current_price.is_finite() || current_price.abs() < DETREND_PRICE_FLOOR {
+        return None;
+    }
+    let span = slope.abs() * (log_values.len() - 1) as f64;
+    let span_ratio = span / current_price.abs();
+    if span_ratio <= DETREND_SPAN_RATIO_THRESHOLD {
+        return None;
+    }
+    info!(
+        slope = format!("{slope:.6}"),
+        intercept = format!("{intercept:.6}"),
+        span_ratio = format!("{span_ratio:.4}"),
+        vr = format!("{:.4}", characteristics.regime.variance_ratio),
+        regime = ?characteristics.regime.regime,
+        "span_ratio above threshold, applying linear detrend"
+    );
+    Some(DetrendState {
+        slope,
+        intercept,
+        training_len: log_values.len(),
+    })
+}
+
+/// Add the linear trend back to a forecast vector. Forecast step i (0-indexed)
+/// corresponds to original-domain index `training_len + i`.
+fn add_trend_if_detrended(values: Vec<f64>, state: &Option<DetrendState>) -> Vec<f64> {
+    match state {
+        Some(s) => values
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| v + s.slope * (s.training_len + i) as f64 + s.intercept)
+            .collect(),
+        None => values,
     }
 }
 
