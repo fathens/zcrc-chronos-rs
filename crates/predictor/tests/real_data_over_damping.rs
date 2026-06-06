@@ -365,3 +365,259 @@ fn per_model_real_token_amplitude() {
         );
     }
 }
+
+#[derive(Debug, Clone)]
+struct TokenRow {
+    series_id: String,
+    regime: &'static str,
+    actual_return: Option<f64>,
+    ets: Option<f64>,
+    theta: Option<f64>,
+    mstl: Option<f64>,
+    npts: Option<f64>,
+    pipeline: Option<f64>,
+}
+
+const MODEL_LABELS: [&str; 4] = ["EtsModel", "ThetaModel", "MstlEtsModel", "NptsModel"];
+
+fn regime_label(values: &[f64]) -> &'static str {
+    use common::TimeSeriesRegime;
+    let analyzer = analyzer::TimeSeriesAnalyzer::new();
+    match analyzer.detect_regime(values).regime {
+        TimeSeriesRegime::Trending => "Trending",
+        TimeSeriesRegime::RandomWalk => "RandomWalk",
+        TimeSeriesRegime::MeanReverting => "MeanReverting",
+    }
+}
+
+fn collect_token_rows(
+    series: &[(String, BTreeMap<NaiveDateTime, BigDecimal>)],
+    horizon_secs: i64,
+) -> Vec<TokenRow> {
+    let horizon_delta = TimeDelta::seconds(horizon_secs);
+    let mut rows = Vec::new();
+
+    for (series_id, full) in series {
+        let Some((train, actual)) = split_series(full, horizon_delta) else {
+            continue;
+        };
+        let train_ts: Vec<NaiveDateTime> = train.keys().copied().collect();
+        let train_values: Vec<f64> = train.values().filter_map(decimal_to_f64).collect();
+        if train_values.len() != train.len() {
+            continue;
+        }
+        let current = *train_values.last().unwrap();
+        if current.abs() < 1e-150 {
+            continue;
+        }
+        let actual_return = last_actual_return(&actual, current);
+        let regime = regime_label(&train_values);
+
+        let median_interval_secs = if train_ts.len() >= 2 {
+            (train_ts[train_ts.len() - 1] - train_ts[0]).num_seconds() / (train_ts.len() as i64 - 1)
+        } else {
+            3600
+        }
+        .max(1);
+        let horizon_steps = ((horizon_secs / median_interval_secs).max(1)) as usize;
+
+        let make_return = |mean: Vec<f64>| -> Option<f64> {
+            let last = *mean.last()?;
+            Some((last - current) / current)
+        };
+
+        let mut ets_model = EtsModel::new(None);
+        let ets = run_model(&mut ets_model, &train_values, &train_ts, horizon_steps)
+            .and_then(make_return);
+
+        let mut theta_model = ThetaModel::new();
+        let theta = run_model(&mut theta_model, &train_values, &train_ts, horizon_steps)
+            .and_then(make_return);
+
+        let mut mstl_model = MstlEtsModel::new(None);
+        let mstl = run_model(&mut mstl_model, &train_values, &train_ts, horizon_steps)
+            .and_then(make_return);
+
+        let mut npts_model = NptsModel::new(None);
+        let npts = run_model(&mut npts_model, &train_values, &train_ts, horizon_steps)
+            .and_then(make_return);
+
+        let input = PredictionInput {
+            data: train.clone(),
+            horizon: horizon_delta,
+        };
+        let pipeline = predict(&input).ok().and_then(|result| {
+            let pred_values: Vec<f64> = result
+                .forecast_values
+                .values()
+                .filter_map(decimal_to_f64)
+                .collect();
+            let last = *pred_values.last()?;
+            Some((last - current) / current)
+        });
+
+        rows.push(TokenRow {
+            series_id: series_id.clone(),
+            regime,
+            actual_return,
+            ets,
+            theta,
+            mstl,
+            npts,
+            pipeline,
+        });
+    }
+    rows
+}
+
+/// Identify the individual model whose `pred_return` is largest for the
+/// given row — the model "pulling" the ensemble up. `None` when no
+/// individual model produced a usable prediction.
+fn top_puller(row: &TokenRow) -> Option<&'static str> {
+    let candidates: [(&'static str, Option<f64>); 4] = [
+        ("EtsModel", row.ets),
+        ("ThetaModel", row.theta),
+        ("MstlEtsModel", row.mstl),
+        ("NptsModel", row.npts),
+    ];
+    candidates
+        .iter()
+        .filter_map(|(name, v)| v.map(|x| (*name, x)))
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(name, _)| name)
+}
+
+fn decile_dir_acc(rows: &[&TokenRow]) -> (usize, usize) {
+    let mut right = 0usize;
+    let mut total = 0usize;
+    for r in rows {
+        let (Some(p), Some(a)) = (r.pipeline, r.actual_return) else {
+            continue;
+        };
+        if p.abs() < FLAT_RETURN_EPSILON || a.abs() < FLAT_RETURN_EPSILON {
+            continue;
+        }
+        total += 1;
+        if p.signum() == a.signum() {
+            right += 1;
+        }
+    }
+    (right, total)
+}
+
+fn decile_mean_actual(rows: &[&TokenRow]) -> Option<f64> {
+    let xs: Vec<f64> = rows.iter().filter_map(|r| r.actual_return).collect();
+    if xs.is_empty() {
+        None
+    } else {
+        Some(xs.iter().sum::<f64>() / xs.len() as f64)
+    }
+}
+
+#[test]
+#[ignore = "diagnostic: decompose the top-decile predictions that drive the production ER-selection loss"]
+fn top_decile_decomposition() {
+    let dir = diag_dir();
+    let horizon_secs = diag_horizon_secs();
+    let series = load_dir(&dir);
+    if series.is_empty() {
+        println!(
+            "# no series loaded; supply JSON fixtures under {}",
+            dir.display()
+        );
+        return;
+    }
+
+    println!("# DIAG_DATA_DIR = {}", dir.display());
+    println!("# DIAG_HORIZON_SECS = {horizon_secs}");
+    println!();
+
+    let rows = collect_token_rows(&series, horizon_secs);
+    println!("# tokens collected = {}", rows.len());
+
+    // Sort by pipeline pred_return descending; rows without a pipeline
+    // prediction sink to the bottom.
+    let mut ranked: Vec<&TokenRow> = rows.iter().collect();
+    ranked.sort_by(|a, b| {
+        let av = a.pipeline.unwrap_or(f64::NEG_INFINITY);
+        let bv = b.pipeline.unwrap_or(f64::NEG_INFINITY);
+        bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let n = ranked.iter().filter(|r| r.pipeline.is_some()).count();
+    if n < 10 {
+        println!("# only {n} ranked predictions; need ≥10 for decile analysis");
+        return;
+    }
+    let decile = (n / 10).max(1);
+    let top: Vec<&TokenRow> = ranked.iter().take(decile).copied().collect();
+    let bottom: Vec<&TokenRow> = ranked
+        .iter()
+        .rev()
+        .filter(|r| r.pipeline.is_some())
+        .take(decile)
+        .copied()
+        .collect();
+
+    let print_decile = |label: &str, rows: &[&TokenRow]| {
+        println!("\n# {label} decile (n={})", rows.len());
+        println!(
+            "{:<28}  {:<14}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10}  {:<12}",
+            "series_id", "regime", "ets", "theta", "mstl", "npts", "pipeline", "actual", "puller",
+        );
+        for r in rows {
+            let f = |o: Option<f64>| {
+                o.map(|v| format!("{v:>+10.4}"))
+                    .unwrap_or_else(|| "       —".to_string())
+            };
+            let puller = top_puller(r).unwrap_or("—");
+            println!(
+                "{:<28}  {:<14}  {}  {}  {}  {}  {}  {}  {:<12}",
+                r.series_id,
+                r.regime,
+                f(r.ets),
+                f(r.theta),
+                f(r.mstl),
+                f(r.npts),
+                f(r.pipeline),
+                f(r.actual_return),
+                puller,
+            );
+        }
+        let (right, total) = decile_dir_acc(rows);
+        let mean_actual = decile_mean_actual(rows);
+        println!(
+            "# {label} decile DirAcc = {} / {}{}",
+            right,
+            total,
+            total
+                .checked_div(1)
+                .filter(|_| total > 0)
+                .map(|_| format!(" ({:.1}%)", 100.0 * right as f64 / total as f64))
+                .unwrap_or_default(),
+        );
+        if let Some(m) = mean_actual {
+            println!("# {label} decile mean actual_return = {m:>+.4}");
+        }
+
+        let mut regime_counts: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut puller_counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for r in rows {
+            *regime_counts.entry(r.regime).or_default() += 1;
+            if let Some(p) = top_puller(r) {
+                *puller_counts.entry(p).or_default() += 1;
+            }
+        }
+        println!("# {label} decile regime composition:");
+        for (k, v) in &regime_counts {
+            println!("    {k:<14} {v}");
+        }
+        println!("# {label} decile top puller (individual model with highest pred_return):");
+        for label in MODEL_LABELS {
+            let count = puller_counts.get(label).copied().unwrap_or(0);
+            println!("    {label:<14} {count}");
+        }
+    };
+
+    print_decile("TOP", &top);
+    print_decile("BOTTOM", &bottom);
+}
