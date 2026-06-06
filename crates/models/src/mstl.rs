@@ -4,6 +4,8 @@ use chrono::NaiveDateTime;
 use common::{ChronosError, ForecastModel, ForecastOutput, ModelCategory, Result};
 use tracing::debug;
 
+use crate::ets::ETS_SPEC;
+
 /// MSTL (Multiple Seasonal-Trend decomposition using Loess) model.
 ///
 /// Decomposes the series into trend + multiple seasonal components + remainder,
@@ -63,7 +65,7 @@ impl ForecastModel for MstlEtsModel {
                 data_length = n,
                 "MSTL: no valid periods, falling back to ETS"
             );
-            let trend_model = augurs::ets::AutoETS::new(1, "ZZN")
+            let trend_model = augurs::ets::AutoETS::new(1, ETS_SPEC)
                 .map_err(|e| ChronosError::ModelError(format!("MSTL ETS init: {e}")))?;
             let fitted = trend_model
                 .fit(values)
@@ -88,7 +90,7 @@ impl ForecastModel for MstlEtsModel {
         );
 
         // Use AutoETS as the trend model for MSTL decomposition
-        let trend_model = augurs::ets::AutoETS::new(1, "ZZN")
+        let trend_model = augurs::ets::AutoETS::new(1, ETS_SPEC)
             .map_err(|e| ChronosError::ModelError(format!("MSTL ETS init: {e}")))?
             .into_trend_model();
 

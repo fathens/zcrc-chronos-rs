@@ -9,18 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Non-seasonal augurs `AutoETS` spec is now `"ZAN"` instead of `"ZZN"`
+  in `EtsModel`, `MstlEtsModel` (no-period fallback and trend model),
+  and the theta-2 line of `ThetaModel`. The previous `"ZZN"` let the
+  AICc search pick `ETS(A,N,N)` — "no trend" — which fits a flat line
+  for the entire forecast horizon. On low-SNR series the AICc penalty
+  for the additional trend parameter routinely won out, and the
+  `real_data_over_damping` diagnostic measured EtsModel and
+  MstlEtsModel returning flat predictions on 56 % of the existing real
+  fixtures (FullPipeline 37 %). Forcing the trend component to
+  Additive (still damped/undamped selected by AICc) collapses the
+  per-model flat rate to 16 % across the same fixtures, with the
+  trend coefficient free to shrink toward zero on genuinely flat
+  series. This addresses the production "168h flat 79 %" symptom that
+  the earlier seasonality fix alone could not move (models)
 - `TimeSeriesAnalyzer::detect_seasonality` no longer reports a numeric
   `period` when the spectral peak is classified as "weak" (score ≤
   0.1). The FFT always returns *some* peak on white-noise data, and
   forwarding that spurious period through `TrainingHints` sent
   EtsModel down the seasonal Holt-Winters path. HW fits trend ≈ 0
   with near-constant seasonal indices on noise, collapsing
-  multi-step forecasts to a flat line. This was the root cause of the
-  production "168h flat 79 %" pathology observed downstream, even
-  though every individual model produced a non-flat forecast in
-  isolation. The "flat" and "outlier" fixtures in the
-  `analyzer_output.json` golden now report `period: null` to match
-  (analyzer)
+  multi-step forecasts to a flat line. The "flat" and "outlier"
+  fixtures in the `analyzer_output.json` golden now report
+  `period: null` to match (analyzer)
 
 ### Added
 

@@ -3,6 +3,8 @@ use chrono::NaiveDateTime;
 use common::{ChronosError, ForecastModel, ForecastOutput, ModelCategory, Result};
 use tracing::debug;
 
+use crate::ets::ETS_SPEC;
+
 /// Theta model: decomposes the series into two "theta lines" and
 /// combines ETS(A,A,N) on the modified series with a linear trend.
 ///
@@ -67,7 +69,7 @@ impl ForecastModel for ThetaModel {
         // Step 2: Fit ETS(A,N,N) on theta=2 line.
         // Fall back to naive (last value) if ETS cannot fit (e.g. constant data).
         let ets_points: Option<Vec<f64>> = (|| -> Option<Vec<f64>> {
-            let auto = augurs::ets::AutoETS::new(1, "ZZN").ok()?;
+            let auto = augurs::ets::AutoETS::new(1, ETS_SPEC).ok()?;
             let fitted = auto.fit(&theta2_values).ok()?;
             let forecast = fitted.predict(horizon, None).ok()?;
             Some(forecast.point)
