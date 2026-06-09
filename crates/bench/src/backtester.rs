@@ -89,7 +89,12 @@ pub fn run_backtest(fixture: &TimeSeriesFixture) -> Vec<BacktestResult> {
         ),
         (
             "NPTS",
-            Box::new(|| Box::new(NptsModel::default()) as Box<dyn ForecastModel>),
+            Box::new(move || {
+                Box::new(NptsModel::with_season_period(
+                    None,
+                    fixture.expected_characteristics.seasonal_period,
+                )) as Box<dyn ForecastModel>
+            }),
         ),
     ];
 
