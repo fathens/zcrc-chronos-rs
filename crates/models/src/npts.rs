@@ -4,10 +4,6 @@ use rayon::prelude::*;
 use scaler::{Scaler, StandardScaler};
 use tracing::debug;
 
-use crate::shrink::{
-    LONG_HORIZON_SHRINK_H0, LONG_HORIZON_SHRINK_TAU, apply_long_horizon_shrinkage,
-};
-
 /// Minimum number of candidate windows to trigger parallel computation.
 /// Below this threshold, sequential iteration is more efficient.
 /// Set to 1000 based on benchmarks showing parallel overhead dominates for smaller datasets.
@@ -172,32 +168,7 @@ impl ForecastModel for NptsModel {
         }
 
         // Inverse transform to original scale
-        let mut mean = scaler.inverse_transform(&mean_normalized)?;
-
-        // Long-horizon magnitude shrinkage. NPTS faithfully extrapolates
-        // whatever its K nearest historical neighbours were followed by;
-        // when those neighbours happen to precede a large rally the
-        // forecast inherits the rally's magnitude across the full
-        // horizon. Production diagnostic
-        // (`real_data_over_damping::top_decile_decomposition`) shows
-        // NPTS supplying 7/15 of the top-magnitude predictions at
-        // h = 168, including +10–35 % outliers whose actuals are flat
-        // to mildly negative.
-        //
-        // Skipped when `season_period` is set: a caller that has already
-        // detected a real seasonal pattern is asking NPTS to ride that
-        // pattern, and shrinking toward the last observed value would
-        // discard the seasonal signal. The production callers that
-        // exhibit the over-confident tail leave `season_period = None`.
-        if self.season_period.is_none() {
-            let last = values[n - 1];
-            apply_long_horizon_shrinkage(
-                &mut mean,
-                last,
-                LONG_HORIZON_SHRINK_TAU,
-                LONG_HORIZON_SHRINK_H0,
-            );
-        }
+        let mean = scaler.inverse_transform(&mean_normalized)?;
 
         Ok(ForecastOutput {
             mean,

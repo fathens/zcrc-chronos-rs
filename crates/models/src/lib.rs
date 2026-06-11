@@ -3,7 +3,6 @@ mod hw;
 mod mstl;
 mod npts;
 mod seasonal_naive;
-mod shrink;
 mod theta;
 
 pub use ets::EtsModel;

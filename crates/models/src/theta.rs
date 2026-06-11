@@ -4,9 +4,6 @@ use common::{ChronosError, ForecastModel, ForecastOutput, ModelCategory, Result}
 use tracing::debug;
 
 use crate::ets::ETS_SPEC;
-use crate::shrink::{
-    LONG_HORIZON_SHRINK_H0, LONG_HORIZON_SHRINK_TAU, apply_long_horizon_shrinkage,
-};
 
 /// Theta model: decomposes the series into two "theta lines" and
 /// combines ETS(A,A,N) on the modified series with a linear trend.
@@ -85,33 +82,12 @@ impl ForecastModel for ThetaModel {
         });
 
         // Step 3: Combine theta=0 (linear extrapolation) and theta=2 (ETS forecast)
-        let mut mean: Vec<f64> = (0..horizon)
+        let mean: Vec<f64> = (0..horizon)
             .map(|h| {
                 let linear = slope * (n + h) as f64 + intercept;
                 (linear + theta2_forecast[h]) / 2.0
             })
             .collect();
-
-        // Long-horizon magnitude shrinkage. The theta=0 line is a raw
-        // linear extrapolation of the in-sample slope, so the deviation
-        // from the last observed value grows linearly with the horizon
-        // index. On low-SNR series that produces over-confident
-        // multi-day forecasts that mean-revert in reality — production
-        // diagnostic (`real_data_over_damping::top_decile_decomposition`)
-        // shows Theta as the most frequent top-decile puller
-        // (47/108) and Theta-linear apys blow-ups of +8 % vs an
-        // actual −15 % to −17 %. Shrinkage at the blended output level
-        // attenuates the linear tail while leaving short-horizon
-        // predictions essentially unchanged.
-        let last = *values
-            .last()
-            .expect("values verified non-empty above (length ≥ 3)");
-        apply_long_horizon_shrinkage(
-            &mut mean,
-            last,
-            LONG_HORIZON_SHRINK_TAU,
-            LONG_HORIZON_SHRINK_H0,
-        );
 
         // Step 4: Residual-based prediction intervals (80% level)
         // Compute in-sample fitted values and residuals
