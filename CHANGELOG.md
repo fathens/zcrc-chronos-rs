@@ -9,22 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `NptsModel` and `ThetaModel` now apply an exponential
-  long-horizon magnitude shrinkage at the output level: each
-  forecast step `h` is replaced by
-  `last + exp(-(h - h0 + 1) / τ) × (raw[h] - last)` once `h ≥ h0`
-  (`h0 = 24`, `τ = 72` steps). NPTS skips the shrinkage when a
-  non-`None` `season_period` is supplied so the bench fixtures that
-  rely on NPTS riding a detected seasonal pattern stay accurate.
-  Production diagnostic (`real_data_over_damping::top_decile_decomposition`,
-  1084 NEAR-token snapshots at h=168) showed NPTS supplying 7/15 of
-  the top-magnitude predictions and Theta 47/108 of top-decile
-  pullers, with TOP-decile DirAcc 28.1 % and mean actual -5.42 %.
-  The shrinkage attenuates a confident +35 % NPTS prediction to
-  ~+4.7 % and an apys-style Theta +8.7 % linear blow-up to ~+1.2 %
-  at the production horizon. The bench backtester forwards
-  `fixture.expected_characteristics.seasonal_period` to NPTS so the
-  ensemble quality gate continues to hold (models, bench)
 - Non-seasonal augurs `AutoETS` spec is now `"ZAN"` instead of `"ZZN"`
   in `EtsModel`, `MstlEtsModel` (no-period fallback and trend model),
   and the theta-2 line of `ThetaModel`. The previous `"ZZN"` let the
