@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `ThetaModel` now damps its theta=0 (linear) extrapolation:
+  `slope × Σᵢ₌₁ʰ⁺¹ φⁱ` with `THETA_DAMPING_PHI = 0.97` replaces the
+  earlier undamped `slope × (n + h)`. The damped sum asymptotes at
+  `slope × φ / (1 − φ) ≈ 32` so a one-week-ahead forecast carries
+  about 5× less linear extrapolation than the previous implementation.
+  Production diagnostic
+  (`real_data_over_damping::top_decile_decomposition`, 1084 NEAR-token
+  snapshots at h = 168) showed Theta as the most frequent top-decile
+  puller (47/108), driving the "high-confidence wrong-direction" tail
+  via single-period linear extrapolation. `φ` is `pub(crate)` so the
+  production team can grid-search it (models)
+- `NptsModel` now trims the K-neighbour subsequent-value slate
+  per-horizon-step before the inverse-distance weighted mean: the
+  largest and smallest `NPTS_TRIM_PER_END = 1` neighbour value at
+  each step are dropped, the rest are weighted as before. NPTS
+  supplied 7/15 of the top-magnitude predictions in the production
+  diagnostic, including +10–35 % outliers whose realised returns
+  were flat to slightly negative; the trim makes the forecast robust
+  to neighbours that happen to precede a single rally without
+  discarding the inverse-distance weighting on the rest of the K
+  slate. `NPTS_TRIM_PER_END` is `pub(crate)` so the production team
+  can grid-search it (models)
 - Non-seasonal augurs `AutoETS` spec is now `"ZAN"` instead of `"ZZN"`
   in `EtsModel`, `MstlEtsModel` (no-period fallback and trend model),
   and the theta-2 line of `ThetaModel`. The previous `"ZZN"` let the
