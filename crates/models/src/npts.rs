@@ -9,6 +9,28 @@ use tracing::debug;
 /// Set to 1000 based on benchmarks showing parallel overhead dominates for smaller datasets.
 const PARALLEL_THRESHOLD: usize = 1000;
 
+/// Number of K-neighbour subsequent values trimmed from each end of the
+/// sorted slate before the inverse-distance weighted average is taken.
+/// At each horizon step h the K neighbours are sorted by their
+/// subsequent value at offset h; the `NPTS_TRIM_PER_END` largest and
+/// smallest are dropped, the rest are weighted by their query-distance.
+///
+/// On crypto-token data the K nearest historical windows occasionally
+/// all precede a single large rally / crash; the corresponding
+/// subsequent values inherit that move and pull the inverse-distance
+/// average to an extreme. Production `top_decile_decomposition`
+/// (1084 NEAR-token snapshots at h = 168) showed NPTS supplying 7/15
+/// of the top-magnitude predictions, including +10–35 % outliers whose
+/// realised returns were flat to slightly negative. Trimming one
+/// neighbour per end at each horizon step makes the forecast robust to
+/// these single-period outliers without throwing away the
+/// inverse-distance weighting that the other neighbours still receive.
+///
+/// `NPTS_TRIM_PER_END` is a `pub(crate)` constant so the production
+/// team can grid-search it (0 = current behaviour, 1 = default, 2 = more
+/// aggressive) via a patched build.
+pub(crate) const NPTS_TRIM_PER_END: usize = 1;
+
 /// NPTS (Non-Parametric Time Series) model.
 ///
 /// K-nearest-neighbor forecasting: finds similar subsequences in history
@@ -143,28 +165,52 @@ impl ForecastModel for NptsModel {
         }
         let top_k = &candidates[..k];
 
-        // Inverse-distance weighting (apply sqrt here since we stored squared distances)
-        // Compute total weight first, then normalize inline to avoid Vec allocation
-        let total_weight: f64 = top_k
+        // Inverse-distance weights for each of the K neighbours. The
+        // weighted average is computed per horizon step after trimming
+        // the high/low outliers (see NPTS_TRIM_PER_END), so the
+        // per-neighbour weight is cached once and reused for every h.
+        let weights: Vec<f64> = top_k
             .iter()
             .map(|(_, d_sq)| 1.0 / (d_sq.sqrt() + 1e-10))
-            .sum();
+            .collect();
 
-        // Weighted average of the subsequent values (on normalized values)
+        // Trim drops the largest and smallest `trim` subsequent values
+        // per horizon step before the weighted average. We need at least
+        // one neighbour to remain after trimming.
+        let trim = if k > 2 * NPTS_TRIM_PER_END {
+            NPTS_TRIM_PER_END
+        } else {
+            0
+        };
+
+        // Scratch buffer reused across horizon steps to avoid per-step
+        // allocation; ordered as `(value, weight)`.
+        let mut scratch: Vec<(f64, f64)> = Vec::with_capacity(k);
         let mut mean_normalized = vec![0.0; horizon];
-        for &(start, d_sq) in top_k {
-            let forecast_start = start + context_len;
-            let w = (1.0 / (d_sq.sqrt() + 1e-10)) / total_weight;
-            for (h, mean_val) in mean_normalized.iter_mut().enumerate() {
-                let source_idx = forecast_start + h;
+        for (h, mean_val) in mean_normalized.iter_mut().enumerate() {
+            scratch.clear();
+            for (i, (start, _)) in top_k.iter().enumerate() {
+                let source_idx = start + context_len + h;
                 let val = if source_idx < n {
                     normalized[source_idx]
                 } else {
                     // If we run out of future values, use the last available
                     normalized[n - 1]
                 };
-                *mean_val += w * val;
+                scratch.push((val, weights[i]));
             }
+            // Sort by value to expose the high/low tail for trimming.
+            scratch.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            let middle = &scratch[trim..k - trim];
+            let total_w: f64 = middle.iter().map(|(_, w)| *w).sum();
+            *mean_val = if total_w > 0.0 {
+                middle.iter().map(|(v, w)| v * w).sum::<f64>() / total_w
+            } else {
+                // Degenerate (all weights zero); fall back to a simple
+                // mean of the trimmed slate.
+                middle.iter().map(|(v, _)| *v).sum::<f64>() / middle.len() as f64
+            };
         }
 
         // Inverse transform to original scale
@@ -201,6 +247,44 @@ mod tests {
         (0..n)
             .map(|i| base + chrono::Duration::hours(i as i64))
             .collect()
+    }
+
+    #[test]
+    fn test_npts_trims_outlier_neighbour_subsequent_value() {
+        // Construct a history where six distinct windows match the
+        // query equally well, but the value that *follows* the first
+        // of those windows is an extreme outlier (price triples in
+        // one step). The trimmed weighted mean must reject that
+        // outlier and produce a forecast close to the typical
+        // following value. With K = 5 and NPTS_TRIM_PER_END = 1 the
+        // top and bottom subsequent value at each h are dropped, so
+        // the +200 % spike has no influence on the forecast.
+        let mut values = vec![10.0, 10.5, 10.2, 10.6, 10.3, 10.7];
+        // First "post-window" sample is an extreme outlier (30.0)…
+        values.push(30.0);
+        values.push(10.4);
+        // …whereas every other repetition's post-window sample stays
+        // around 10.4–10.5.
+        for _ in 0..6 {
+            values.extend_from_slice(&[10.0, 10.5, 10.2, 10.6, 10.3, 10.7]);
+            values.push(10.45);
+            values.push(10.4);
+        }
+        let ts = make_timestamps(values.len());
+
+        let mut model = NptsModel::new(Some(5));
+        let output = model.fit_predict(&values, &ts, 1).unwrap();
+        let predicted = output.mean[0];
+        // The forecast must NOT inherit the 30.0 outlier; it must stay
+        // near the typical post-window value (≈ 10.45).
+        assert!(
+            (predicted - 10.45).abs() < 1.5,
+            "trimmed forecast {predicted} drifted toward the outlier 30.0"
+        );
+        assert!(
+            predicted < 15.0,
+            "outlier leaked into forecast: {predicted}"
+        );
     }
 
     #[test]
