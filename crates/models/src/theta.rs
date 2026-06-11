@@ -5,6 +5,30 @@ use tracing::debug;
 
 use crate::ets::ETS_SPEC;
 
+/// Damping coefficient for the theta=0 (linear) component of
+/// [`ThetaModel`].
+///
+/// The classical Theta line uses an undamped linear extrapolation
+/// `slope × (n + h)` for the theta-0 component. On low-SNR crypto data
+/// this produces over-confident multi-day forecasts that the production
+/// `top_decile_decomposition` diagnostic identified as the dominant
+/// "high-confidence wrong-direction" tail (Theta accounted for 47/108
+/// of the TOP decile pullers at h = 168 h on 1084 NEAR-token snapshots).
+///
+/// Replacing the linear extrapolation with a damped trend bounds the
+/// total deviation: the cumulative trend `slope × Σᵢ₌₁ʰ⁺¹ φⁱ` is
+/// monotone in `h` but asymptotes at `slope × φ / (1 − φ)` as
+/// `h → ∞`, so the model never extrapolates more than `φ / (1 − φ)`
+/// steps' worth of slope no matter how long the horizon. With
+/// `φ = 0.97` the asymptote is ~32 steps of slope; at `h = 168` the
+/// damped sum is ~32, versus 168 for the undamped extrapolation
+/// (≈ 5× attenuation on a one-week-ahead forecast).
+///
+/// `φ` is intentionally a `pub(crate)` constant so the production team
+/// can grid-search it via a patched build until `predict_sweep`
+/// `decile_spread` at `h = 168` crosses zero.
+pub(crate) const THETA_DAMPING_PHI: f64 = 0.97;
+
 /// Theta model: decomposes the series into two "theta lines" and
 /// combines ETS(A,A,N) on the modified series with a linear trend.
 ///
@@ -81,10 +105,22 @@ impl ForecastModel for ThetaModel {
             vec![last; horizon]
         });
 
-        // Step 3: Combine theta=0 (linear extrapolation) and theta=2 (ETS forecast)
+        // Step 3: Combine theta=0 (damped linear extrapolation) and
+        // theta=2 (ETS forecast). The damped trend bounds the cumulative
+        // extrapolation at slope × φ / (1 − φ) regardless of horizon —
+        // see THETA_DAMPING_PHI for the rationale.
+        let phi = THETA_DAMPING_PHI;
+        let linear_last_fit = slope * (n as f64 - 1.0) + intercept;
         let mean: Vec<f64> = (0..horizon)
             .map(|h| {
-                let linear = slope * (n + h) as f64 + intercept;
+                // Σᵢ₌₁ʰ⁺¹ φⁱ = φ × (1 − φʰ⁺¹) / (1 − φ) for φ ≠ 1, else h+1.
+                let h_plus_1 = (h + 1) as f64;
+                let damped_steps = if (phi - 1.0).abs() < 1e-12 {
+                    h_plus_1
+                } else {
+                    phi * (1.0 - phi.powi((h + 1) as i32)) / (1.0 - phi)
+                };
+                let linear = linear_last_fit + slope * damped_steps;
                 (linear + theta2_forecast[h]) / 2.0
             })
             .collect();
@@ -177,6 +213,40 @@ mod tests {
         let mut model = ThetaModel::new();
         let result = model.fit_predict(&[1.0, 2.0], &make_timestamps(2), 3);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_theta_damped_trend_asymptotes_at_long_horizon() {
+        // On a clean linear trend the theta=0 component would, without
+        // damping, predict slope × h additional movement at step h. The
+        // damped formula bounds the cumulative trend at
+        // slope × φ / (1 − φ). For φ = 0.97 the asymptote is ~32 steps
+        // of slope, so a 200-step-ahead forecast must NOT continue the
+        // trend linearly.
+        let mut model = ThetaModel::new();
+        // Clean linear trend with no noise: slope = 1.
+        let values: Vec<f64> = (0..50).map(|i| 100.0 + i as f64).collect();
+        let ts = make_timestamps(50);
+        // The theta-2 component on a perfectly linear series will inherit
+        // the same trend, so the blended forecast still grows. The damped
+        // theta=0 contribution alone should asymptote, so the gap between
+        // two distant horizon points stays bounded.
+        let output = model.fit_predict(&values, &ts, 200).unwrap();
+        assert_eq!(output.mean.len(), 200);
+        // The theta-0 contribution to mean[199] over what an undamped
+        // extrapolation would give: undamped_slope × 200 = 200, damped
+        // sum (asymptotic) ≈ 32. The blend halves both contributions, so
+        // mean[199] should be at least slope × 200 / 2 = 100 below the
+        // undamped Theta extrapolation. We assert the looser bound that
+        // the forecast does not run away linearly.
+        let last_train = *values.last().unwrap(); // 149
+        let undamped_extrapolation = last_train + 200.0;
+        assert!(
+            output.mean[199] < undamped_extrapolation,
+            "damped theta forecast {} must not exceed undamped extrapolation {}",
+            output.mean[199],
+            undamped_extrapolation
+        );
     }
 
     #[test]
