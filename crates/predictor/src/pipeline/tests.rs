@@ -135,6 +135,89 @@ fn test_predict_random_walk_no_detrend() {
 }
 
 #[test]
+fn test_add_trend_if_detrended_undamped_matches_original_formula() {
+    // With phi = 1.0 the helper must reproduce the original
+    // `slope × (training_len + i) + intercept` retrend.
+    let state = Some(DetrendState {
+        slope: 0.5,
+        intercept: 10.0,
+        training_len: 100,
+    });
+    let zeros = vec![0.0_f64; 5];
+    let out = add_trend_if_detrended(zeros, &state, 1.0);
+    for (i, v) in out.iter().enumerate() {
+        let expected = 0.5 * (100.0 + i as f64) + 10.0;
+        assert!(
+            (v - expected).abs() < 1e-9,
+            "step {i}: got {v}, expected {expected}"
+        );
+    }
+}
+
+#[test]
+fn test_add_trend_if_detrended_damping_caps_long_horizon() {
+    // With phi = 0.97 the per-step extrapolation is bounded by
+    // slope × phi / (1 - phi) ≈ 32.3 × slope, regardless of horizon.
+    let state = Some(DetrendState {
+        slope: 1.0,
+        intercept: 0.0,
+        training_len: 50,
+    });
+    let zeros = vec![0.0_f64; 500];
+    let damped = add_trend_if_detrended(zeros.clone(), &state, 0.97);
+    let undamped = add_trend_if_detrended(zeros, &state, 1.0);
+    // At i = 0 both formulas yield level_at_n only.
+    let level = 1.0 * 50.0;
+    assert!((damped[0] - level).abs() < 1e-9);
+    assert!((undamped[0] - level).abs() < 1e-9);
+    // Asymptotic damped excursion is level + slope × phi / (1 − phi) ≈ 50 + 32.33.
+    let asymptote = level + 1.0 * 0.97 / (1.0 - 0.97);
+    assert!(damped[499] < asymptote + 0.1);
+    // Undamped at i = 499 is level + 499.
+    assert!((undamped[499] - (level + 499.0)).abs() < 1e-9);
+    // Monotone: damped must keep approaching the asymptote without crossing it.
+    for window in damped.windows(2) {
+        assert!(window[1] >= window[0] - 1e-12);
+        assert!(window[1] < asymptote + 0.1);
+    }
+}
+
+#[test]
+fn test_add_trend_if_detrended_skips_when_state_is_none() {
+    let raw = vec![1.0, 2.0, 3.0];
+    let out = add_trend_if_detrended(raw.clone(), &None, 0.97);
+    assert_eq!(out, raw);
+}
+
+#[test]
+fn test_parse_adaptive_detrend_value() {
+    assert!(parse_adaptive_detrend_value(None));
+    assert!(parse_adaptive_detrend_value(Some("1")));
+    assert!(parse_adaptive_detrend_value(Some("true")));
+    assert!(parse_adaptive_detrend_value(Some("on")));
+    assert!(!parse_adaptive_detrend_value(Some("0")));
+    assert!(!parse_adaptive_detrend_value(Some("false")));
+    assert!(!parse_adaptive_detrend_value(Some("False")));
+    assert!(!parse_adaptive_detrend_value(Some("OFF")));
+    assert!(!parse_adaptive_detrend_value(Some("no")));
+}
+
+#[test]
+fn test_parse_retrend_damping_phi() {
+    assert_eq!(parse_retrend_damping_phi(None), 1.0);
+    assert_eq!(parse_retrend_damping_phi(Some("0.97")), 0.97);
+    assert_eq!(parse_retrend_damping_phi(Some("1.0")), 1.0);
+    // Out-of-range, NaN, and garbage fall back to 1.0.
+    for bad in ["0", "1.5", "-0.5", "nan", "garbage", ""] {
+        assert_eq!(
+            parse_retrend_damping_phi(Some(bad)),
+            1.0,
+            "invalid value {bad:?} must fall back to 1.0"
+        );
+    }
+}
+
+#[test]
 fn test_compute_detrend_state_gates_on_span_ratio() {
     use common::{RegimeInfo, TimeSeriesCharacteristics, TimeSeriesRegime, TrendInfo};
 
