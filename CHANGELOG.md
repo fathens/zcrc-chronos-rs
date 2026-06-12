@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Two runtime knobs for the adaptive-detrend stage in the prediction
+  pipeline so the production team can A/B-test it from
+  `predict_sweep` without recompiling:
+  `CHRONOS_ADAPTIVE_DETREND` (set to `0` / `false` / `off` / `no` to
+  bypass the detrend stage entirely) and
+  `CHRONOS_RETREND_DAMPING_PHI` (a value in `(0, 1]` that replaces
+  the linear retrend extrapolation `slope × i` with the damped sum
+  `slope × Σⱼ₌₁ⁱ φʲ`, asymptoting at `slope × φ / (1 − φ)`). Default
+  behaviour (variables unset) is unchanged. Production verification
+  on 1084 NEAR-token snapshots traced 38 % of TOP-decile rows to the
+  pipeline retrend producing predictions larger than every base
+  model — toggling these flags isolates that path (predictor)
+
 ### Fixed
 
 - `ThetaModel` now damps its theta=0 (linear) extrapolation:
