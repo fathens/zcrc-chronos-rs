@@ -126,17 +126,27 @@ impl ForecastModel for Ar1RevertingModel {
             var.sqrt()
         };
 
+        // Cumulative AR(1) level variance: the h-step level forecast is
+        // the running sum of returns, each of which has a damped error
+        // contribution `Σᵢ₌₀ˢ⁻¹ φⁱ = (1 − φˢ) / (1 − φ)`. Squaring and
+        // summing those weights gives `Var(level_h) = σ² · Σₛ₌₁ʰ
+        // ((1 − φˢ) / (1 − φ))²`, which grows like √h as `φ → 0` (random
+        // walk) and asymptotes for `|φ|` close to 1. The earlier
+        // `Σⱼ φ²ʲ` form underestimated this — it bounded the band even
+        // when the underlying process was a random walk.
         let z = 1.2816;
+        let inv = 1.0 / (1.0 - phi);
         let mut lower = Vec::with_capacity(horizon);
         let mut upper = Vec::with_capacity(horizon);
         let mut cum_var = 0.0_f64;
-        let mut phi_pow_sq = 1.0_f64;
+        let mut phi_s = phi;
         for &m in mean.iter() {
-            cum_var += phi_pow_sq;
-            phi_pow_sq *= phi * phi;
+            let w = (1.0 - phi_s) * inv;
+            cum_var += w * w;
             let band = z * residual_std * cum_var.sqrt();
             lower.push(m - band);
             upper.push(m + band);
+            phi_s *= phi;
         }
 
         Ok(ForecastOutput {
@@ -148,23 +158,43 @@ impl ForecastModel for Ar1RevertingModel {
     }
 }
 
+/// Centered ordinary least squares: returns `(slope, intercept)` for
+/// the linear fit `y = slope * x + intercept`.
+///
+/// The centered normal equations `Sxx = Σ(xᵢ − x̄)²`,
+/// `Sxy = Σ(xᵢ − x̄)(yᵢ − ȳ)` avoid the catastrophic cancellation that
+/// the textbook form `n·Σx² − (Σx)²` suffers from on data with a large
+/// non-zero mean. The Ar1 reverting model fits returns (typically
+/// `O(1)` or smaller), but the helper guards against a later caller
+/// passing raw price-scale samples where `Σx² ≈ (Σx)²` falls inside the
+/// ULP of `f64`, which would turn the slope estimate into noise and let
+/// the AR(1) recursion blow the level forecast up via an arbitrarily
+/// large intercept `c`.
 fn simple_linreg(x: &[f64], y: &[f64]) -> (f64, f64) {
     let n = x.len() as f64;
     if n < 1.0 {
         return (0.0, 0.0);
     }
-    let sum_x: f64 = x.iter().sum();
-    let sum_y: f64 = y.iter().sum();
-    let sum_xy: f64 = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum();
-    let sum_x2: f64 = x.iter().map(|a| a * a).sum();
+    let mean_x: f64 = x.iter().sum::<f64>() / n;
+    let mean_y: f64 = y.iter().sum::<f64>() / n;
 
-    let denom = n * sum_x2 - sum_x * sum_x;
-    if denom.abs() < 1e-15 {
-        return (0.0, sum_y / n);
+    let mut sxx = 0.0_f64;
+    let mut sxy = 0.0_f64;
+    for (xi, yi) in x.iter().zip(y.iter()) {
+        let dx = xi - mean_x;
+        sxx += dx * dx;
+        sxy += dx * (yi - mean_y);
     }
 
-    let slope = (n * sum_xy - sum_x * sum_y) / denom;
-    let intercept = (sum_y - slope * sum_x) / n;
+    if sxx < 1e-15 {
+        return (0.0, mean_y);
+    }
+
+    let slope = sxy / sxx;
+    let intercept = mean_y - slope * mean_x;
+    if !slope.is_finite() || !intercept.is_finite() {
+        return (0.0, mean_y);
+    }
     (slope, intercept)
 }
 
@@ -318,5 +348,98 @@ mod tests {
         let mut model = Ar1RevertingModel::new();
         let result = model.fit_predict(&[1.0, 2.0], &make_timestamps(2), 3);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ar1_band_grows_with_horizon_when_phi_is_near_zero() {
+        // Build a near-random-walk: independent returns drawn from a
+        // simple deterministic shuffle so phi estimates close to zero
+        // and the residual variance dominates. The level forecast then
+        // accumulates uncorrelated step errors, so the band must grow
+        // like √h. The earlier `Σⱼ φ²ʲ` formula collapsed to 1 for
+        // φ → 0 and held the band constant — that's the bug fixed
+        // here.
+        let mut returns = Vec::with_capacity(200);
+        for i in 0..200 {
+            // Alternating +1 / −1 returns make Σ correlations vanish
+            // and phi ≈ −1 (perfectly anti-correlated). To stay near
+            // phi ≈ 0 instead, use a longer-period pattern that breaks
+            // the lag-1 correlation: 1, 1, −1, −1 repeating.
+            let v = if (i / 2) % 2 == 0 { 1.0 } else { -1.0 };
+            returns.push(v);
+        }
+        let values = integrate(&returns, 100.0);
+        let ts = make_timestamps(values.len());
+        let mut model = Ar1RevertingModel::new();
+        let out = model.fit_predict(&values, &ts, 50).unwrap();
+        let lower = out.lower_quantile.expect("band must be Some");
+        let upper = out.upper_quantile.expect("band must be Some");
+        let band_at = |h: usize| -> f64 { upper[h] - lower[h] };
+
+        let early = band_at(0);
+        let late = band_at(49);
+        assert!(
+            late > early * 3.0,
+            "band must grow with horizon when phi is small; early {} late {}",
+            early,
+            late,
+        );
+    }
+
+    #[test]
+    fn test_ar1_band_collapses_to_zero_on_constant_series() {
+        // Constant input has no residual variance, so the band must be
+        // exactly zero at every horizon. This guards the band formula
+        // against producing a spurious non-zero band when residual_std
+        // collapses.
+        let values = vec![42.0_f64; 50];
+        let ts = make_timestamps(values.len());
+        let mut model = Ar1RevertingModel::new();
+        let out = model.fit_predict(&values, &ts, 5).unwrap();
+        let lower = out.lower_quantile.expect("band must be Some");
+        let upper = out.upper_quantile.expect("band must be Some");
+        for (lo, up) in lower.iter().zip(upper.iter()) {
+            assert!(
+                (up - lo).abs() < 1e-9,
+                "band must vanish; got [{}, {}]",
+                lo,
+                up
+            );
+        }
+    }
+
+    #[test]
+    fn test_ar1_linreg_stable_under_large_scale_offset() {
+        // The classical `n·Σx² − (Σx)²` form of OLS underflows when the
+        // sample mean is large compared to the spread: both terms grow
+        // like (n·x̄)² while their difference is the desired
+        // `n·Σ(x−x̄)²`. Constructing an explicit case where the textbook
+        // form returns garbage but the centered form recovers the true
+        // slope locks the centering in.
+        let n = 100;
+        let offset = 1.0e9_f64;
+        // True slope = 0.001, intercept after shift = offset.
+        // y = 0.001 * x + offset (no noise).
+        let xs: Vec<f64> = (0..n).map(|i| offset + i as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| 0.001 * x + offset).collect();
+        let (slope, intercept) = simple_linreg(&xs, &ys);
+        assert!(
+            (slope - 0.001).abs() < 1e-6,
+            "centered slope must recover the true value; got {}",
+            slope,
+        );
+        // Intercept is huge (≈ 1.001e9), only assert it stays finite
+        // and the residual `y - (slope*x + intercept)` is tiny.
+        assert!(intercept.is_finite());
+        let resid_max = xs
+            .iter()
+            .zip(ys.iter())
+            .map(|(&x, &y)| (y - (slope * x + intercept)).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            resid_max < 1e-3,
+            "fit residual must be small under large-scale offset; got {}",
+            resid_max,
+        );
     }
 }
