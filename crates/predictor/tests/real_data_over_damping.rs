@@ -621,3 +621,254 @@ fn top_decile_decomposition() {
     print_decile("TOP", &top);
     print_decile("BOTTOM", &bottom);
 }
+
+/// Bucket the linear-trend "span ratio" that the production detrend gate
+/// uses (`|slope| × (n - 1) / |current_price|`). Boundaries are aligned
+/// with the production gate (`pipeline::DETREND_SPAN_RATIO_THRESHOLD =
+/// 0.15`) so that "narrow band" callers can quantify the share of flat
+/// predictions whose underlying series carries a *genuine* linear trend
+/// but is rejected by the gate just below the cutoff.
+fn span_ratio_bucket(span_ratio: f64) -> &'static str {
+    if span_ratio < 0.01 {
+        // No measurable linear trend at all: detrend has nothing to
+        // inject, so the resulting flat prediction is structurally
+        // correct (memecoin-style "no signal" case).
+        "span≈0 (no-trend)"
+    } else if span_ratio < 0.10 {
+        "span∈[0.01,0.10) (low-trend)"
+    } else if span_ratio <= 0.15 {
+        // The genuine rescue candidates: a measurable trend exists but
+        // the production gate (0.15) rejects it just below the cutoff.
+        "span∈[0.10,0.15] (narrow-band, rescue candidate)"
+    } else {
+        "span>0.15 (above gate)"
+    }
+}
+
+/// Categorical outcome of the adaptive-detrend gate, recomputed locally
+/// from the analyzer's public characteristics so the diagnostic does not
+/// need to reach into `pipeline::compute_detrend_state` (which is
+/// `pub(crate)`). The conditions are kept aligned with
+/// `pipeline::compute_detrend_state`; if that gate ever changes, this
+/// helper must be updated as well.
+fn detrend_outcome(train_values: &[f64]) -> (&'static str, Option<f64>) {
+    use common::TimeSeriesRegime;
+
+    // Mirror `pipeline::adaptive_detrend_enabled`. The diagnostic respects
+    // the same env-var override the production pipeline reads so that
+    // running with `CHRONOS_ADAPTIVE_DETREND=0` reports every row as
+    // env-disabled, matching real behaviour.
+    let env_enabled = match std::env::var("CHRONOS_ADAPTIVE_DETREND").ok().as_deref() {
+        Some(v) => {
+            !(v == "0"
+                || v.eq_ignore_ascii_case("false")
+                || v.eq_ignore_ascii_case("off")
+                || v.eq_ignore_ascii_case("no"))
+        }
+        None => true,
+    };
+    if !env_enabled {
+        return ("env disabled", None);
+    }
+
+    if train_values.is_empty() {
+        return ("empty input", None);
+    }
+
+    let analyzer = analyzer::TimeSeriesAnalyzer::new();
+    // The diagnostic reuses the raw (non-normalised) training values;
+    // production runs `normalize_time_series_data` first but the fixtures
+    // used here are already evenly-spaced hourly series, so the
+    // normalisation is a no-op and the analysis would match.
+    let timestamps: Vec<NaiveDateTime> = (0..train_values.len())
+        .map(|i| {
+            chrono::NaiveDate::from_ymd_opt(2024, 1, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                + TimeDelta::hours(i as i64)
+        })
+        .collect();
+    let characteristics = analyzer.analyze(train_values, &timestamps);
+
+    // The pipeline checks `is_exponential && all values > 0` before
+    // log-transforming. When the log transform is applied the detrend
+    // gate short-circuits to `None`, so we report that case explicitly.
+    let is_exponential = characteristics.trend.is_exponential;
+    if is_exponential && train_values.iter().all(|&v| v > 0.0) {
+        return ("log-transformed (gate skipped)", None);
+    }
+
+    if characteristics.regime.regime == TimeSeriesRegime::MeanReverting {
+        return ("regime=MeanReverting", None);
+    }
+    let slope = characteristics.trend.slope;
+    let intercept = characteristics.trend.intercept;
+    if !slope.is_finite() || !intercept.is_finite() {
+        return ("slope/intercept non-finite", None);
+    }
+    let current_price = *train_values.last().unwrap();
+    if !current_price.is_finite() || current_price.abs() < 1e-150 {
+        return ("current_price below floor", Some(0.0));
+    }
+    let span = slope.abs() * (train_values.len() as f64 - 1.0);
+    let span_ratio = span / current_price.abs();
+    if span_ratio <= 0.15 {
+        return (span_ratio_bucket(span_ratio), Some(span_ratio));
+    }
+    ("applied (span>0.15)", Some(span_ratio))
+}
+
+#[test]
+#[ignore = "diagnostic: decompose flat pipeline predictions by detrend-gate outcome"]
+fn flat_prediction_decomposition() {
+    let dir = diag_dir();
+    let horizon_secs = diag_horizon_secs();
+    let series = load_dir(&dir);
+    if series.is_empty() {
+        println!(
+            "# no series loaded; supply JSON fixtures under {}",
+            dir.display()
+        );
+        return;
+    }
+
+    println!("# DIAG_DATA_DIR = {}", dir.display());
+    println!("# DIAG_HORIZON_SECS = {horizon_secs}");
+    println!();
+
+    let rows = collect_token_rows(&series, horizon_secs);
+    let total = rows.iter().filter(|r| r.pipeline.is_some()).count();
+    if total == 0 {
+        println!("# no rows with pipeline predictions");
+        return;
+    }
+    println!("# tokens with pipeline prediction = {total}");
+
+    // The 1e-7 threshold matches `pipeline::FLAT_RETURN_EPSILON`, the
+    // production-side gate that classifies a pred_return as "flat".
+    let flat_rows: Vec<&TokenRow> = rows
+        .iter()
+        .filter(|r| {
+            r.pipeline
+                .map(|p| p.abs() < FLAT_RETURN_EPSILON)
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let flat_share = 100.0 * flat_rows.len() as f64 / total as f64;
+    println!(
+        "# flat pipeline predictions = {} / {} ({:.1}%)",
+        flat_rows.len(),
+        total,
+        flat_share,
+    );
+
+    // Per-base-model flat counts on the same fixture universe.
+    let mut per_model_flat: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for r in &rows {
+        if r.pipeline.is_none() {
+            continue;
+        }
+        for (label, opt) in [
+            ("EtsModel", r.ets),
+            ("ThetaModel", r.theta),
+            ("MstlEtsModel", r.mstl),
+            ("NptsModel", r.npts),
+            ("FullPipeline", r.pipeline),
+        ] {
+            let entry = per_model_flat.entry(label).or_default();
+            if let Some(v) = opt {
+                entry.1 += 1;
+                if v.abs() < FLAT_RETURN_EPSILON {
+                    entry.0 += 1;
+                }
+            }
+        }
+    }
+    println!("\n# per-model flat rate (over rows where the model returned a prediction)");
+    println!(
+        "{:<14}  {:>8}  {:>8}  {:>8}",
+        "model", "flat", "total", "rate"
+    );
+    for (label, (flat, n)) in &per_model_flat {
+        let rate = if *n > 0 {
+            format!("{:>7.1}%", 100.0 * (*flat as f64) / (*n as f64))
+        } else {
+            "—".to_string()
+        };
+        println!("{label:<14}  {flat:>8}  {n:>8}  {rate:>8}");
+    }
+
+    // Regime composition of the flat subset.
+    let mut regime_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for r in &flat_rows {
+        *regime_counts.entry(r.regime).or_default() += 1;
+    }
+    println!("\n# flat-subset regime composition");
+    for (k, v) in &regime_counts {
+        println!("    {k:<14} {v}");
+    }
+
+    // Detrend-gate outcome decomposition. Re-run the analyzer per series
+    // so we can attribute each flat row to a concrete skip reason, then
+    // bucket span_ratio for the "rescue candidate" share.
+    let mut gate_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut narrow_band: Vec<(String, f64, Option<f64>)> = Vec::new();
+    for (series_id, full) in &series {
+        let Some((train, _)) = split_series(full, TimeDelta::seconds(horizon_secs)) else {
+            continue;
+        };
+        let train_values: Vec<f64> = train.values().filter_map(decimal_to_f64).collect();
+        if train_values.len() != train.len() {
+            continue;
+        }
+        let pipeline = rows
+            .iter()
+            .find(|r| &r.series_id == series_id)
+            .and_then(|r| r.pipeline);
+        let is_flat = pipeline
+            .map(|p| p.abs() < FLAT_RETURN_EPSILON)
+            .unwrap_or(false);
+        if !is_flat {
+            continue;
+        }
+
+        let (reason, span_ratio) = detrend_outcome(&train_values);
+        *gate_counts.entry(reason).or_default() += 1;
+        if reason == "span∈[0.10,0.15] (narrow-band, rescue candidate)" {
+            let actual = rows
+                .iter()
+                .find(|r| &r.series_id == series_id)
+                .and_then(|r| r.actual_return);
+            narrow_band.push((series_id.clone(), span_ratio.unwrap_or(0.0), actual));
+        }
+    }
+    println!(
+        "\n# flat-subset detrend-gate outcome (n = {})",
+        flat_rows.len()
+    );
+    let mut sorted: Vec<(&&str, &usize)> = gate_counts.iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(a.1));
+    for (k, v) in sorted {
+        let pct = 100.0 * (*v as f64) / (flat_rows.len() as f64);
+        println!("    {:<42} {:>5}  ({:>5.1}%)", k, v, pct);
+    }
+
+    if !narrow_band.is_empty() {
+        println!(
+            "\n# narrow-band rescue candidates (n = {}, span_ratio ∈ [0.10, 0.15])",
+            narrow_band.len(),
+        );
+        println!(
+            "{:<28}  {:>10}  {:>14}",
+            "series_id", "span_ratio", "actual_return"
+        );
+        for (id, span, actual) in &narrow_band {
+            let actual_disp = actual
+                .map(|a| format!("{a:>+14.4}"))
+                .unwrap_or_else(|| "             —".to_string());
+            println!("{id:<28}  {span:>10.4}  {actual_disp}");
+        }
+    }
+}
