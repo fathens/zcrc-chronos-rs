@@ -22,6 +22,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `flat_prediction_decomposition` diagnostic in
+  `crates/predictor/tests/real_data_over_damping.rs`, a sibling of
+  the existing `top_decile_decomposition`. For every fixture whose
+  pipeline forecast lands in the "flat" band
+  (`|pred_return| < FLAT_RETURN_EPSILON`) the test bucketises the
+  detrend-gate skip reason — `span ≈ 0` (no measurable linear
+  trend), `span ∈ [0.01, 0.10)`, `span ∈ [0.10, 0.15]`
+  (narrow-band rescue candidate), `regime=MeanReverting`, etc. —
+  and emits per-model flat rates plus a regime breakdown.
+  Production run on the 1084-fixture NEAR universe at h=168 traced
+  94 % of pipeline-flat rows to the `span ≈ 0` (no-trend)
+  bucket, with only 3 narrow-band rescue candidates, all on a
+  single memecoin fixture. The decomposition retires "lower the
+  detrend gate threshold" as a flat-rate lever: the bulk of flat
+  is structurally correct on series with no underlying linear
+  signal (predictor)
 - Two runtime knobs for the adaptive-detrend stage in the prediction
   pipeline so the production team can A/B-test it from
   `predict_sweep` without recompiling:
