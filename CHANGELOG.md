@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `CHRONOS_RETREND_DAMPING_PHI` default lowered from `1.0`
+  (undamped) to `0.90`. Production `predict_sweep` (271 NEAR tokens,
+  27,100 predictions on the 03-29 .. 04-09 block) graded `φ = 0.90`
+  as the empirical optimum at the production `h = 168` horizon:
+  IC moved from `-0.031` (undamped) to `+0.012` (positive for the
+  first time across all tried fixes) and decile spread from
+  `-4.82 %` to `-0.59 %`. The `0.85 / 0.90` plateau marks the
+  recommended grid endpoint. Setting `CHRONOS_RETREND_DAMPING_PHI=1.0`
+  reproduces the previous undamped behaviour for direct comparison
+  (predictor)
+
 ### Added
 
 - Two runtime knobs for the adaptive-detrend stage in the prediction
@@ -16,11 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bypass the detrend stage entirely) and
   `CHRONOS_RETREND_DAMPING_PHI` (a value in `(0, 1]` that replaces
   the linear retrend extrapolation `slope × i` with the damped sum
-  `slope × Σⱼ₌₁ⁱ φʲ`, asymptoting at `slope × φ / (1 − φ)`). Default
-  behaviour (variables unset) is unchanged. Production verification
-  on 1084 NEAR-token snapshots traced 38 % of TOP-decile rows to the
-  pipeline retrend producing predictions larger than every base
-  model — toggling these flags isolates that path (predictor)
+  `slope × Σⱼ₌₁ⁱ φʲ`, asymptoting at `slope × φ / (1 − φ)`).
+  Production verification on 1084 NEAR-token snapshots traced 38 %
+  of TOP-decile rows to the pipeline retrend producing predictions
+  larger than every base model — toggling these flags isolates that
+  path (predictor)
 
 ### Fixed
 

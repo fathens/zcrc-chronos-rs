@@ -204,15 +204,15 @@ fn test_parse_adaptive_detrend_value() {
 
 #[test]
 fn test_parse_retrend_damping_phi() {
-    assert_eq!(parse_retrend_damping_phi(None), 1.0);
+    assert_eq!(parse_retrend_damping_phi(None), RETREND_DAMPING_PHI_DEFAULT);
     assert_eq!(parse_retrend_damping_phi(Some("0.97")), 0.97);
     assert_eq!(parse_retrend_damping_phi(Some("1.0")), 1.0);
-    // Out-of-range, NaN, and garbage fall back to 1.0.
+    // Out-of-range, NaN, and garbage fall back to the default.
     for bad in ["0", "1.5", "-0.5", "nan", "garbage", ""] {
         assert_eq!(
             parse_retrend_damping_phi(Some(bad)),
-            1.0,
-            "invalid value {bad:?} must fall back to 1.0"
+            RETREND_DAMPING_PHI_DEFAULT,
+            "invalid value {bad:?} must fall back to the default"
         );
     }
 }
