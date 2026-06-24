@@ -218,60 +218,6 @@ fn test_parse_retrend_damping_phi() {
 }
 
 #[test]
-fn test_parse_revert_horizon_min_secs() {
-    assert_eq!(
-        parse_revert_horizon_min_secs(None),
-        REVERT_HORIZON_MIN_SECS_DEFAULT
-    );
-    assert_eq!(parse_revert_horizon_min_secs(Some("0")), 0);
-    assert_eq!(parse_revert_horizon_min_secs(Some("604800")), 604_800);
-    // Garbage / negative / non-integer values fall back.
-    for bad in ["-1", "1.5", "nan", "garbage", ""] {
-        assert_eq!(
-            parse_revert_horizon_min_secs(Some(bad)),
-            REVERT_HORIZON_MIN_SECS_DEFAULT,
-            "invalid value {bad:?} must fall back to the default"
-        );
-    }
-}
-
-#[test]
-fn test_parse_revert_magnitude_threshold() {
-    assert_eq!(
-        parse_revert_magnitude_threshold(None),
-        REVERT_MAGNITUDE_THRESHOLD_DEFAULT
-    );
-    assert_eq!(parse_revert_magnitude_threshold(Some("0.0")), 0.0);
-    assert_eq!(parse_revert_magnitude_threshold(Some("0.1")), 0.1);
-    assert_eq!(parse_revert_magnitude_threshold(Some("10.0")), 10.0);
-    // Negative / NaN / Inf / garbage fall back; the threshold is a
-    // simple-return magnitude so negative values are not meaningful.
-    for bad in ["-0.05", "nan", "inf", "-inf", "garbage", ""] {
-        assert_eq!(
-            parse_revert_magnitude_threshold(Some(bad)),
-            REVERT_MAGNITUDE_THRESHOLD_DEFAULT,
-            "invalid value {bad:?} must fall back to the default"
-        );
-    }
-}
-
-#[test]
-fn test_parse_revert_blend_alpha() {
-    assert_eq!(parse_revert_blend_alpha(None), REVERT_BLEND_ALPHA_DEFAULT);
-    assert_eq!(parse_revert_blend_alpha(Some("0.0")), 0.0);
-    assert_eq!(parse_revert_blend_alpha(Some("0.5")), 0.5);
-    assert_eq!(parse_revert_blend_alpha(Some("1.0")), 1.0);
-    // Out-of-range, NaN, and garbage fall back to the default (off).
-    for bad in ["-0.1", "1.5", "nan", "inf", "garbage", ""] {
-        assert_eq!(
-            parse_revert_blend_alpha(Some(bad)),
-            REVERT_BLEND_ALPHA_DEFAULT,
-            "invalid value {bad:?} must fall back to the default"
-        );
-    }
-}
-
-#[test]
 fn test_compute_detrend_state_gates_on_span_ratio() {
     use common::{RegimeInfo, TimeSeriesCharacteristics, TimeSeriesRegime, TrendInfo};
 

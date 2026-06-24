@@ -22,45 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `Ar1RevertingModel` in the `models` crate. Estimates
-  `r_t = c + φ r_{t-1} + ε` on the first-difference series via
-  centered OLS, clamps `|φ| ≤ 0.99` for stationarity, then projects
-  the horizon recursively. On short histories (`n < 22`) it falls
-  back to a flat last-value forecast and on perfectly correlated
-  return series it gracefully reduces to `(slope, intercept) = (0,
-  mean)` instead of producing garbage from catastrophic cancellation
-  in the normal-equation denominator. The cumulative band variance
-  uses `Σₛ₌₁ʰ ((1 − φˢ) / (1 − φ))²`, which grows like √h on a
-  near-random-walk process rather than asymptoting incorrectly. The
-  model exists so the pipeline can blend a structural mean-reverter
-  into the otherwise momentum-only base ensemble — see the
-  `crates/predictor` reverting blend entry below (models)
-- Reverting blend post-process in the prediction pipeline, exposed
-  via three new env vars so the production team can grid-search the
-  trigger from `predict_sweep` without recompiling. Default
-  behaviour (variables unset) is a true no-op:
-  `CHRONOS_REVERT_BLEND_ALPHA` (default `0.0`, off — values in
-  `(0, 1]` enable a per-step `(1 − α) · base + α · ar1` blend on
-  the post-retrend forecast),
-  `CHRONOS_REVERT_MAGNITUDE_THRESHOLD` (default `0.05` = 5 %
-  simple-return — predictions whose `|pred_return|` is at or below
-  the threshold pass through unchanged), and
-  `CHRONOS_REVERT_HORIZON_MIN_SECS` (default `0` — minimum forecast
-  horizon in seconds; below this the overlay never fires). The
-  overlay sits between Step 5a (retrend) and Step 5b (`safe_exp`)
-  so the blend always occurs in the trend-included
-  log-or-price domain that the AR(1) model is fitted on, and it
-  rejects any configuration that would break the
-  `lower ≤ mean ≤ upper` invariant. When the blend fires the
-  `ForecastResult.model_name` is suffixed with `+Ar1Revert` for
-  downstream observability. Motivation: production retro on the
-  271-token NEAR universe at h=168 (`improve.md` 2026-06-15 updates
-  7-8) showed that the convex hull of the momentum-only base
-  ensemble cannot contain a reverting forecast, producing the
-  confident-wrong tail (pred>+5% mean actual_return = -2.87% on
-  n=162). The overlay widens the hull so a downstream
-  `predict_sweep` grid can A/B the blend strength without touching
-  the existing detrend or retrend behaviour (predictor)
 - `flat_prediction_decomposition` diagnostic in
   `crates/predictor/tests/real_data_over_damping.rs`, a sibling of
   the existing `top_decile_decomposition`. For every fixture whose

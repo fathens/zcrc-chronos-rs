@@ -186,13 +186,6 @@ impl Predictor {
         // already compresses exponential trends.
         let detrend_state = compute_detrend_state(&characteristics, &log_values, log_transformed);
 
-        // Snapshot the same-domain history before `train_values` consumes
-        // `log_values`. The Step 5a.5 reverting blend needs the
-        // trend-included series (log when log_transformed, raw price
-        // otherwise) so the gate's pred_return and the AR(1) fit share
-        // the domain that `mean_after_trend` is computed in.
-        let revert_fit_values: Vec<f64> = log_values.clone();
-
         let train_values: Vec<f64> = if let Some(ref state) = detrend_state {
             log_values
                 .iter()
@@ -265,69 +258,6 @@ impl Predictor {
         let upper_after_trend = forecast
             .upper_quantile
             .map(|v| add_trend_if_detrended(v, &detrend_state, phi));
-
-        // Step 5a.5: Reverting blend post-process. Disabled by default
-        // (`CHRONOS_REVERT_BLEND_ALPHA` unset → α = 0). When enabled,
-        // the overlay shrinks confident momentum forecasts toward an
-        // explicit AR(1) reverting prediction so the ensemble can
-        // escape the convex hull of its momentum-only base models on
-        // mean-reverting forward returns. All gate / domain decisions
-        // live in `revert_blend::apply_revert_blend`; the pipeline
-        // only feeds env-derived thresholds and the same-domain
-        // anchor / history.
-        let revert_alpha = revert_blend_alpha();
-        let revert_theta = revert_magnitude_threshold();
-        let revert_horizon_min = revert_horizon_min_secs();
-        let horizon_secs = input.horizon.num_seconds().max(0) as u64;
-        let revert_eligible = revert_alpha > 0.0
-            && horizon_secs >= revert_horizon_min
-            && !revert_fit_values.is_empty();
-
-        let (mean_after_trend, lower_after_trend, upper_after_trend, blend_applied) =
-            if revert_eligible {
-                let anchor = *revert_fit_values
-                    .last()
-                    .expect("revert_eligible verified non-empty above");
-                // `Ar1RevertingModel::fit_predict` ignores timestamps,
-                // so an empty slice is sufficient here and avoids
-                // cloning `norm_timestamps` (which has already been
-                // moved into the training pool closure above).
-                match revert_blend::apply_revert_blend(
-                    &mean_after_trend,
-                    lower_after_trend.as_deref(),
-                    upper_after_trend.as_deref(),
-                    &revert_fit_values,
-                    &[],
-                    anchor,
-                    log_transformed,
-                    revert_alpha,
-                    revert_theta,
-                ) {
-                    Some(blended) => {
-                        info!(
-                            alpha = revert_alpha,
-                            magnitude_threshold = revert_theta,
-                            horizon_min_secs = revert_horizon_min,
-                            pred_return = blended.pred_return,
-                            "reverting blend applied"
-                        );
-                        (blended.mean, blended.lower, blended.upper, true)
-                    }
-                    None => (
-                        mean_after_trend,
-                        lower_after_trend,
-                        upper_after_trend,
-                        false,
-                    ),
-                }
-            } else {
-                (
-                    mean_after_trend,
-                    lower_after_trend,
-                    upper_after_trend,
-                    false,
-                )
-            };
 
         // Step 5b: Inverse transform if log was applied
         let final_mean: Vec<f64> = if log_transformed {
@@ -411,20 +341,12 @@ impl Predictor {
             _ => None,
         };
 
-        let model_name = if blend_applied {
-            let mut s = forecast.model_name;
-            s.push_str("+Ar1Revert");
-            s
-        } else {
-            forecast.model_name
-        };
-
         Ok(ForecastResult {
             forecast_values,
             lower_bound,
             upper_bound,
             predicted_std,
-            model_name,
+            model_name: forecast.model_name,
             strategy_name,
             processing_time_secs: processing_time,
             model_count: metadata.model_count,
@@ -517,81 +439,6 @@ fn parse_retrend_damping_phi(value: Option<&str>) -> f64 {
 /// Read [`RETREND_DAMPING_PHI_ENV`] and return a valid damping factor.
 fn retrend_damping_phi() -> f64 {
     parse_retrend_damping_phi(std::env::var(RETREND_DAMPING_PHI_ENV).ok().as_deref())
-}
-
-/// Environment variable: minimum forecast horizon (in seconds) for the
-/// reverting blend post-process to fire. Horizons below this threshold
-/// skip the AR(1) overlay entirely, regardless of the predicted return
-/// magnitude. Default `0` lets every horizon trigger when the
-/// magnitude gate is met; raising this — e.g. to `604_800` (one week)
-/// — restricts the overlay to long-horizon predictions where the
-/// momentum-vs-reversion cross-section bites hardest.
-const REVERT_HORIZON_MIN_SECS_ENV: &str = "CHRONOS_REVERT_HORIZON_MIN_SECS";
-
-/// Environment variable: simple-return magnitude threshold for the
-/// reverting blend gate. Predictions whose `|pred_return|` is at or
-/// below this value pass through unchanged. Default `0.05` (5 %)
-/// targets the "confident momentum" tail that `improve.md` 2026-06-15
-/// updates 7-8 identified as the source of the confident-wrong loss.
-const REVERT_MAGNITUDE_THRESHOLD_ENV: &str = "CHRONOS_REVERT_MAGNITUDE_THRESHOLD";
-
-/// Environment variable: per-step blend weight on the AR(1) reverting
-/// forecast. Acceptable range `(0, 1]`. `α = 0` (default) disables the
-/// overlay completely — the rest of the pipeline returns exactly the
-/// pre-Step-2 forecast. `α = 1` replaces the base forecast with the
-/// AR(1) forecast outright. Intermediate values produce a per-step
-/// convex combination `(1 − α) · base + α · ar1`.
-const REVERT_BLEND_ALPHA_ENV: &str = "CHRONOS_REVERT_BLEND_ALPHA";
-
-/// Default for [`REVERT_HORIZON_MIN_SECS_ENV`]. `0` keeps every
-/// horizon eligible for the overlay so the magnitude gate alone
-/// decides whether it fires.
-pub(crate) const REVERT_HORIZON_MIN_SECS_DEFAULT: u64 = 0;
-
-/// Default for [`REVERT_MAGNITUDE_THRESHOLD_ENV`]. Five percent picks
-/// up the confident-wrong tail that production tracked at
-/// `pred > +5 %` while leaving small-magnitude forecasts untouched.
-pub(crate) const REVERT_MAGNITUDE_THRESHOLD_DEFAULT: f64 = 0.05;
-
-/// Default for [`REVERT_BLEND_ALPHA_ENV`]. The overlay is off by
-/// default so this Step 2 landing is a true no-op until the
-/// production team picks a value through `predict_sweep`.
-pub(crate) const REVERT_BLEND_ALPHA_DEFAULT: f64 = 0.0;
-
-fn parse_revert_horizon_min_secs(value: Option<&str>) -> u64 {
-    value
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(REVERT_HORIZON_MIN_SECS_DEFAULT)
-}
-
-fn parse_revert_magnitude_threshold(value: Option<&str>) -> f64 {
-    value
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v >= 0.0)
-        .unwrap_or(REVERT_MAGNITUDE_THRESHOLD_DEFAULT)
-}
-
-fn parse_revert_blend_alpha(value: Option<&str>) -> f64 {
-    value
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|&v| v.is_finite() && (0.0..=1.0).contains(&v))
-        .unwrap_or(REVERT_BLEND_ALPHA_DEFAULT)
-}
-
-fn revert_horizon_min_secs() -> u64 {
-    parse_revert_horizon_min_secs(std::env::var(REVERT_HORIZON_MIN_SECS_ENV).ok().as_deref())
-}
-
-fn revert_magnitude_threshold() -> f64 {
-    parse_revert_magnitude_threshold(
-        std::env::var(REVERT_MAGNITUDE_THRESHOLD_ENV)
-            .ok()
-            .as_deref(),
-    )
-}
-
-fn revert_blend_alpha() -> f64 {
-    parse_revert_blend_alpha(std::env::var(REVERT_BLEND_ALPHA_ENV).ok().as_deref())
 }
 
 /// Decide whether to apply the linear detrend pre-processor and return the
@@ -769,8 +616,6 @@ pub fn predict(input: &PredictionInput) -> Result<ForecastResult> {
         .map_err(|e| ChronosError::ModelError(format!("default predictor init failed: {e}")))?;
     predictor.predict(input)
 }
-
-mod revert_blend;
 
 #[cfg(test)]
 mod tests;
