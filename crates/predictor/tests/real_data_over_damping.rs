@@ -376,6 +376,10 @@ struct TokenRow {
     mstl: Option<f64>,
     npts: Option<f64>,
     pipeline: Option<f64>,
+    // Last-step predicted_std divided by `current` (price-relative scale).
+    // Used by the flat-vs-non-flat diagnostic to validate the Markowitz
+    // assumption "flat prediction ⇒ wide band ⇒ large variance ⇒ down-weight".
+    predicted_std_ratio: Option<f64>,
 }
 
 const MODEL_LABELS: [&str; 4] = ["EtsModel", "ThetaModel", "MstlEtsModel", "NptsModel"];
@@ -446,7 +450,8 @@ fn collect_token_rows(
             data: train.clone(),
             horizon: horizon_delta,
         };
-        let pipeline = predict(&input).ok().and_then(|result| {
+        let pipeline_result = predict(&input).ok();
+        let pipeline = pipeline_result.as_ref().and_then(|result| {
             let pred_values: Vec<f64> = result
                 .forecast_values
                 .values()
@@ -454,6 +459,16 @@ fn collect_token_rows(
                 .collect();
             let last = *pred_values.last()?;
             Some((last - current) / current)
+        });
+        let predicted_std_ratio = pipeline_result.as_ref().and_then(|result| {
+            let std_map = result.predicted_std.as_ref()?;
+            let std_values: Vec<f64> = std_map.values().filter_map(decimal_to_f64).collect();
+            let last = *std_values.last()?;
+            let denom = current.abs();
+            if denom < 1e-150 {
+                return None;
+            }
+            Some(last / denom)
         });
 
         rows.push(TokenRow {
@@ -465,6 +480,7 @@ fn collect_token_rows(
             mstl,
             npts,
             pipeline,
+            predicted_std_ratio,
         });
     }
     rows
@@ -871,4 +887,85 @@ fn flat_prediction_decomposition() {
             println!("{id:<28}  {span:>10.4}  {actual_disp}");
         }
     }
+
+    // predicted_std/price distribution (zaciraci Markowitz integration: question A).
+    // Verifies the assumption "flat prediction ⇒ wide band ⇒ large variance".
+    // If flat group's median ratio is GREATER than non-flat's, the assumption
+    // holds and predicted_std can be fed into per-token variance directly.
+    // If flat ≤ non-flat, the assumption is INVERTED and zaciraci must use a
+    // transform (e.g. 1/std, or a flat-detection gate orthogonal to std).
+    let mut flat_ratios: Vec<f64> = Vec::new();
+    let mut nonflat_ratios: Vec<f64> = Vec::new();
+    for r in &rows {
+        let Some(pred) = r.pipeline else { continue };
+        let Some(ratio) = r.predicted_std_ratio else {
+            continue;
+        };
+        if !ratio.is_finite() {
+            continue;
+        }
+        if pred.abs() < FLAT_RETURN_EPSILON {
+            flat_ratios.push(ratio);
+        } else {
+            nonflat_ratios.push(ratio);
+        }
+    }
+    println!("\n# predicted_std / price distribution (flat vs non-flat pipeline predictions)");
+    println!(
+        "{:<10}  {:>5}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10}",
+        "group", "n", "p10", "p25", "p50", "p75", "p90", "mean",
+    );
+    print_ratio_row("flat", &mut flat_ratios);
+    print_ratio_row("non-flat", &mut nonflat_ratios);
+
+    if !flat_ratios.is_empty() && !nonflat_ratios.is_empty() {
+        let flat_med = percentile(&flat_ratios, 0.50);
+        let nonflat_med = percentile(&nonflat_ratios, 0.50);
+        let verdict = if flat_med > nonflat_med {
+            "OK: flat_median > non-flat_median (predicted_std can be fed into variance directly)"
+        } else {
+            "INVERTED: flat_median ≤ non-flat_median \
+             (predicted_std as variance would up-weight flat predictions — \
+             requires transform or orthogonal gate)"
+        };
+        println!(
+            "\n# verdict: {verdict}\n#   flat_median = {flat_med:.6}, non-flat_median = {nonflat_med:.6}",
+        );
+    } else {
+        println!(
+            "\n# verdict: insufficient data (need both flat and non-flat predicted_std samples)"
+        );
+    }
+}
+
+fn percentile(sorted_or_unsorted: &[f64], q: f64) -> f64 {
+    if sorted_or_unsorted.is_empty() {
+        return f64::NAN;
+    }
+    let mut v: Vec<f64> = sorted_or_unsorted.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    let idx = ((n as f64 - 1.0) * q).round() as usize;
+    v[idx.min(n - 1)]
+}
+
+fn print_ratio_row(label: &str, ratios: &mut [f64]) {
+    if ratios.is_empty() {
+        println!(
+            "{label:<10}  {:>5}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10}  {:>10}",
+            0, "—", "—", "—", "—", "—", "—"
+        );
+        return;
+    }
+    ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = ratios.len();
+    let mean: f64 = ratios.iter().sum::<f64>() / n as f64;
+    let p10 = percentile(ratios, 0.10);
+    let p25 = percentile(ratios, 0.25);
+    let p50 = percentile(ratios, 0.50);
+    let p75 = percentile(ratios, 0.75);
+    let p90 = percentile(ratios, 0.90);
+    println!(
+        "{label:<10}  {n:>5}  {p10:>10.6}  {p25:>10.6}  {p50:>10.6}  {p75:>10.6}  {p90:>10.6}  {mean:>10.6}",
+    );
 }
