@@ -5,11 +5,32 @@ use tracing::debug;
 
 use crate::hw;
 
+/// Non-seasonal augurs AutoETS specification used by [`EtsModel`],
+/// [`crate::mstl::MstlEtsModel`], and the theta-2 line of
+/// [`crate::theta::ThetaModel`].
+///
+/// `"ZAN"` means: error component selected by AICc, **trend forced to
+/// additive (damped or undamped, AICc picks)**, no seasonal component.
+///
+/// The previous spec `"ZZN"` let AICc also pick "no trend" (ETS(A,N,N)).
+/// On low-SNR series — common in crypto-token price data — the AICc
+/// penalty for the extra trend parameter often outweighed the
+/// trend-fitting improvement, and the predictor returned a perfectly
+/// flat forecast for the entire horizon. The
+/// `real_data_over_damping` diagnostic showed this affecting >50 % of
+/// the existing real fixtures. Forcing `Additive` removes the
+/// "no-trend" branch from the AICc search; the resulting damped/
+/// undamped pair still allows the slope to shrink toward zero when the
+/// data genuinely lacks a trend, but the forecast is no longer
+/// identically constant.
+pub(crate) const ETS_SPEC: &str = "ZAN";
+
 /// ETS model wrapper around augurs AutoETS.
 ///
 /// When `season_length > 1`, uses a custom Holt-Winters implementation
 /// that supports additive and multiplicative seasonality.
-/// Otherwise falls back to augurs AutoETS with "ZZN" (non-seasonal) spec.
+/// Otherwise falls back to augurs AutoETS with "ZAN" (non-seasonal,
+/// additive trend) spec — see `ETS_SPEC` below for the rationale.
 pub struct EtsModel {
     season_length: Option<usize>,
 }
@@ -69,8 +90,8 @@ impl ForecastModel for EtsModel {
             );
         }
 
-        // Non-seasonal: use augurs AutoETS ("ZZN")
-        let spec = "ZZN";
+        // Non-seasonal: use augurs AutoETS with `ETS_SPEC`.
+        let spec = ETS_SPEC;
         let season_len = 1;
 
         debug!(

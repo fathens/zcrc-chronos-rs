@@ -7,6 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `CHRONOS_RETREND_DAMPING_PHI` default lowered from `1.0`
+  (undamped) to `0.90`. Production `predict_sweep` (271 NEAR tokens,
+  27,100 predictions on the 03-29 .. 04-09 block) graded `φ = 0.90`
+  as the empirical optimum at the production `h = 168` horizon:
+  IC moved from `-0.031` (undamped) to `+0.012` (positive for the
+  first time across all tried fixes) and decile spread from
+  `-4.82 %` to `-0.59 %`. The `0.85 / 0.90` plateau marks the
+  recommended grid endpoint. Setting `CHRONOS_RETREND_DAMPING_PHI=1.0`
+  reproduces the previous undamped behaviour for direct comparison
+  (predictor)
+
+### Added
+
+- `flat_prediction_decomposition` diagnostic in
+  `crates/predictor/tests/real_data_over_damping.rs`, a sibling of
+  the existing `top_decile_decomposition`. For every fixture whose
+  pipeline forecast lands in the "flat" band
+  (`|pred_return| < FLAT_RETURN_EPSILON`) the test bucketises the
+  detrend-gate skip reason — `span ≈ 0` (no measurable linear
+  trend), `span ∈ [0.01, 0.10)`, `span ∈ [0.10, 0.15]`
+  (narrow-band rescue candidate), `regime=MeanReverting`, etc. —
+  and emits per-model flat rates plus a regime breakdown.
+  Production run on the 1084-fixture NEAR universe at h=168 traced
+  94 % of pipeline-flat rows to the `span ≈ 0` (no-trend)
+  bucket, with only 3 narrow-band rescue candidates, all on a
+  single memecoin fixture. The decomposition retires "lower the
+  detrend gate threshold" as a flat-rate lever: the bulk of flat
+  is structurally correct on series with no underlying linear
+  signal (predictor)
+- Two runtime knobs for the adaptive-detrend stage in the prediction
+  pipeline so the production team can A/B-test it from
+  `predict_sweep` without recompiling:
+  `CHRONOS_ADAPTIVE_DETREND` (set to `0` / `false` / `off` / `no` to
+  bypass the detrend stage entirely) and
+  `CHRONOS_RETREND_DAMPING_PHI` (a value in `(0, 1]` that replaces
+  the linear retrend extrapolation `slope × i` with the damped sum
+  `slope × Σⱼ₌₁ⁱ φʲ`, asymptoting at `slope × φ / (1 − φ)`).
+  Production verification on 1084 NEAR-token snapshots traced 38 %
+  of TOP-decile rows to the pipeline retrend producing predictions
+  larger than every base model — toggling these flags isolates that
+  path (predictor)
+
+### Fixed
+
+- `ThetaModel` now damps its theta=0 (linear) extrapolation:
+  `slope × Σᵢ₌₁ʰ⁺¹ φⁱ` with `THETA_DAMPING_PHI = 0.97` replaces the
+  earlier undamped `slope × (n + h)`. The damped sum asymptotes at
+  `slope × φ / (1 − φ) ≈ 32` so a one-week-ahead forecast carries
+  about 5× less linear extrapolation than the previous implementation.
+  Production diagnostic
+  (`real_data_over_damping::top_decile_decomposition`, 1084 NEAR-token
+  snapshots at h = 168) showed Theta as the most frequent top-decile
+  puller (47/108), driving the "high-confidence wrong-direction" tail
+  via single-period linear extrapolation. `φ` is `pub(crate)` so the
+  production team can grid-search it (models)
+- `NptsModel` now trims the K-neighbour subsequent-value slate
+  per-horizon-step before the inverse-distance weighted mean: the
+  largest and smallest `NPTS_TRIM_PER_END = 1` neighbour value at
+  each step are dropped, the rest are weighted as before. NPTS
+  supplied 7/15 of the top-magnitude predictions in the production
+  diagnostic, including +10–35 % outliers whose realised returns
+  were flat to slightly negative; the trim makes the forecast robust
+  to neighbours that happen to precede a single rally without
+  discarding the inverse-distance weighting on the rest of the K
+  slate. `NPTS_TRIM_PER_END` is `pub(crate)` so the production team
+  can grid-search it (models)
+- Non-seasonal augurs `AutoETS` spec is now `"ZAN"` instead of `"ZZN"`
+  in `EtsModel`, `MstlEtsModel` (no-period fallback and trend model),
+  and the theta-2 line of `ThetaModel`. The previous `"ZZN"` let the
+  AICc search pick `ETS(A,N,N)` — "no trend" — which fits a flat line
+  for the entire forecast horizon. On low-SNR series the AICc penalty
+  for the additional trend parameter routinely won out, and the
+  `real_data_over_damping` diagnostic measured EtsModel and
+  MstlEtsModel returning flat predictions on 56 % of the existing real
+  fixtures (FullPipeline 37 %). Forcing the trend component to
+  Additive (still damped/undamped selected by AICc) collapses the
+  per-model flat rate to 16 % across the same fixtures, with the
+  trend coefficient free to shrink toward zero on genuinely flat
+  series. This addresses the production "168h flat 79 %" symptom that
+  the earlier seasonality fix alone could not move (models)
+- `TimeSeriesAnalyzer::detect_seasonality` no longer reports a numeric
+  `period` when the spectral peak is classified as "weak" (score ≤
+  0.1). The FFT always returns *some* peak on white-noise data, and
+  forwarding that spurious period through `TrainingHints` sent
+  EtsModel down the seasonal Holt-Winters path. HW fits trend ≈ 0
+  with near-constant seasonal indices on noise, collapsing
+  multi-step forecasts to a flat line. The "flat" and "outlier"
+  fixtures in the `analyzer_output.json` golden now report
+  `period: null` to match (analyzer)
+
 ### Added
 
 - Regime detection via Lo-MacKinlay Variance Ratio Test, exposed on

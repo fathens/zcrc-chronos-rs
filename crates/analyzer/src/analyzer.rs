@@ -250,8 +250,17 @@ impl TimeSeriesAnalyzer {
             "weak"
         };
 
+        // The FFT will always return *some* peak even on white-noise data,
+        // so we only forward a numeric `period` when the spectral peak is
+        // at least "moderate". Letting a weak peak through into
+        // TrainingHints.season_period sends EtsModel down the seasonal
+        // Holt-Winters path; on noisy non-seasonal series HW fits trend ≈
+        // 0 with near-constant seasonal indices and the forecast collapses
+        // to a flat line.
+        let reported_period = if strength == "weak" { None } else { period };
+
         debug!(
-            period = ?period,
+            period = ?reported_period,
             strength = strength,
             score = format!("{:.3}", strength_score),
             "Seasonality detected"
@@ -259,7 +268,7 @@ impl TimeSeriesAnalyzer {
 
         SeasonalityInfo {
             strength: strength.into(),
-            period,
+            period: reported_period,
             score: strength_score,
             dominant_frequency: Some(freq),
         }
@@ -1075,6 +1084,33 @@ mod tests {
         let chars = analyzer.analyze(&vals, &ts);
         assert_ne!(chars.seasonality.strength, "weak");
         assert_eq!(chars.seasonality.period, Some(12));
+    }
+
+    #[test]
+    fn test_seasonality_period_is_none_for_weak_noise() {
+        // White-noise series: the FFT will still pick some spurious peak,
+        // but the strength_score lands in the "weak" bucket and the
+        // analyzer must report `period = None`. Forwarding a spurious
+        // period sends EtsModel down the seasonal Holt-Winters path,
+        // which collapses to a flat forecast at long horizons.
+        let analyzer = TimeSeriesAnalyzer::new();
+        let mut state: u64 = 42;
+        let n = 200;
+        let vals: Vec<f64> = (0..n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                (state >> 33) as f64 / (1u64 << 31) as f64
+            })
+            .collect();
+        let ts = uniform_timestamps(n, 3600);
+        let chars = analyzer.analyze(&vals, &ts);
+        assert_eq!(chars.seasonality.strength, "weak");
+        assert_eq!(
+            chars.seasonality.period, None,
+            "weak-strength seasonality must not report a period"
+        );
     }
 
     #[test]

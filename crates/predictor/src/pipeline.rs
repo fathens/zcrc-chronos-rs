@@ -247,13 +247,17 @@ impl Predictor {
 
         // Step 5a: Add the linear trend back to the forecast if detrend was applied.
         // Forecast step i corresponds to original index (training_len + i).
-        let mean_after_trend = add_trend_if_detrended(forecast.mean, &detrend_state);
+        // The damping coefficient `phi` (default 1.0 = undamped) is read
+        // once per `predict()` invocation to keep zaciraci's predict_sweep
+        // grid-search runs internally consistent.
+        let phi = retrend_damping_phi();
+        let mean_after_trend = add_trend_if_detrended(forecast.mean, &detrend_state, phi);
         let lower_after_trend = forecast
             .lower_quantile
-            .map(|v| add_trend_if_detrended(v, &detrend_state));
+            .map(|v| add_trend_if_detrended(v, &detrend_state, phi));
         let upper_after_trend = forecast
             .upper_quantile
-            .map(|v| add_trend_if_detrended(v, &detrend_state));
+            .map(|v| add_trend_if_detrended(v, &detrend_state, phi));
 
         // Step 5b: Inverse transform if log was applied
         let final_mean: Vec<f64> = if log_transformed {
@@ -360,6 +364,83 @@ struct DetrendState {
     training_len: usize,
 }
 
+/// Environment variable controlling whether the adaptive linear detrend
+/// stage runs at all. Setting it to `0`, `false`, or `off`
+/// (case-insensitive) bypasses both `compute_detrend_state` and the
+/// re-trend step, so the predictor returns raw model output without
+/// adding back any extrapolated linear trend.
+///
+/// Default behaviour (variable unset, or set to anything else) is
+/// **detrend enabled** — identical to the pre-flag implementation.
+///
+/// Exposed as a runtime knob because the zaciraci 06-12 verification
+/// showed that on 38 % of production TOP-decile rows the
+/// FullPipeline forecast exceeded every individual model, with the
+/// excess traceable to the linear retrend extrapolation over
+/// `h = 168` h. Toggling this variable lets the production team A/B
+/// the entire detrend stage in `predict_sweep` without recompiling.
+const ADAPTIVE_DETREND_ENV: &str = "CHRONOS_ADAPTIVE_DETREND";
+
+/// Environment variable controlling the damping coefficient applied to
+/// the re-trend extrapolation in [`add_trend_if_detrended`]. The
+/// default is [`RETREND_DAMPING_PHI_DEFAULT`]. Values in `(0, 1)`
+/// replace the per-step `i` term with the geometric sum
+/// `Σⱼ₌₁ⁱ φʲ = φ × (1 - φⁱ) / (1 - φ)`, which asymptotes at
+/// `φ / (1 - φ)` and so bounds the long-horizon extrapolation;
+/// `φ = 1.0` reproduces the original undamped behaviour
+/// `slope × (training_len + i)`.
+///
+/// Values outside `(0, 1]`, NaN, and unparseable strings are ignored
+/// (the default is used).
+const RETREND_DAMPING_PHI_ENV: &str = "CHRONOS_RETREND_DAMPING_PHI";
+
+/// Default damping coefficient used when [`RETREND_DAMPING_PHI_ENV`]
+/// is unset or unparseable. Production `predict_sweep` on the
+/// 271-token / 27,100-prediction NEAR universe identified `φ = 0.90`
+/// as the empirical optimum: the IC at the production `h = 168`
+/// horizon flipped from `-0.031` (undamped) to `+0.012`, and the
+/// decile spread improved from `-4.82 %` to `-0.59 %`. The
+/// `0.85 / 0.90` plateau pins this to the recommended grid endpoint
+/// without overshooting into territory where the retrend stops
+/// adding any directional information.
+pub(crate) const RETREND_DAMPING_PHI_DEFAULT: f64 = 0.90;
+
+/// Parse the [`ADAPTIVE_DETREND_ENV`] payload. Pulled out of the
+/// env-reading helper so that callers (and tests) can exercise the
+/// truthiness rules without mutating process state.
+fn parse_adaptive_detrend_value(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => {
+            !(v == "0"
+                || v.eq_ignore_ascii_case("false")
+                || v.eq_ignore_ascii_case("off")
+                || v.eq_ignore_ascii_case("no"))
+        }
+        None => true,
+    }
+}
+
+/// Read [`ADAPTIVE_DETREND_ENV`] and return whether the detrend stage
+/// should run. Defaults to `true` when the variable is unset.
+fn adaptive_detrend_enabled() -> bool {
+    parse_adaptive_detrend_value(std::env::var(ADAPTIVE_DETREND_ENV).ok().as_deref())
+}
+
+/// Parse the [`RETREND_DAMPING_PHI_ENV`] payload, falling back to
+/// [`RETREND_DAMPING_PHI_DEFAULT`] on any malformed or out-of-range
+/// input.
+fn parse_retrend_damping_phi(value: Option<&str>) -> f64 {
+    value
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|&v| v.is_finite() && v > 0.0 && v <= 1.0)
+        .unwrap_or(RETREND_DAMPING_PHI_DEFAULT)
+}
+
+/// Read [`RETREND_DAMPING_PHI_ENV`] and return a valid damping factor.
+fn retrend_damping_phi() -> f64 {
+    parse_retrend_damping_phi(std::env::var(RETREND_DAMPING_PHI_ENV).ok().as_deref())
+}
+
 /// Decide whether to apply the linear detrend pre-processor and return the
 /// captured state when it is applied. See [`DETREND_SPAN_RATIO_THRESHOLD`]
 /// for the rationale behind the slope-magnitude gate.
@@ -368,6 +449,9 @@ fn compute_detrend_state(
     log_values: &[f64],
     log_transformed: bool,
 ) -> Option<DetrendState> {
+    if !adaptive_detrend_enabled() {
+        return None;
+    }
     if log_transformed || log_values.is_empty() {
         return None;
     }
@@ -409,13 +493,32 @@ fn compute_detrend_state(
 
 /// Add the linear trend back to a forecast vector. Forecast step i (0-indexed)
 /// corresponds to original-domain index `training_len + i`.
-fn add_trend_if_detrended(values: Vec<f64>, state: &Option<DetrendState>) -> Vec<f64> {
+///
+/// The retrend adds two terms: the in-sample level at the last training
+/// index (`slope × training_len + intercept`, constant across the
+/// horizon) and a per-step extrapolation. The per-step extrapolation
+/// uses the damped sum `slope × Σⱼ₌₁ⁱ φʲ` when `phi < 1.0`; when
+/// `phi = 1.0` (the default), it collapses to the original undamped
+/// `slope × i` and the formula reduces to `slope × (training_len + i)`.
+fn add_trend_if_detrended(values: Vec<f64>, state: &Option<DetrendState>, phi: f64) -> Vec<f64> {
     match state {
-        Some(s) => values
-            .into_iter()
-            .enumerate()
-            .map(|(i, v)| v + s.slope * (s.training_len + i) as f64 + s.intercept)
-            .collect(),
+        Some(s) => {
+            let level_at_n = s.slope * s.training_len as f64 + s.intercept;
+            let phi_eq_one = (phi - 1.0).abs() < 1e-12;
+            values
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let extra = if phi_eq_one {
+                        s.slope * i as f64
+                    } else {
+                        // Σⱼ₌₁ⁱ φʲ = φ × (1 − φⁱ) / (1 − φ); for i = 0 this is 0.
+                        s.slope * phi * (1.0 - phi.powi(i as i32)) / (1.0 - phi)
+                    };
+                    v + level_at_n + extra
+                })
+                .collect()
+        }
         None => values,
     }
 }

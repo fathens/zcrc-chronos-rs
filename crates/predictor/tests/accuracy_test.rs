@@ -71,6 +71,12 @@ fn run_pipeline(train_values: &[f64], horizon: usize) -> Vec<f64> {
 
 #[test]
 fn test_pure_trend_accuracy() {
+    // Pin retrend damping to 1.0: a pure linear trend should not be damped.
+    // Pipeline default phi=0.90 is calibrated for noisy financial series where
+    // long-horizon over-trending is the dominant failure mode.
+    let prev = std::env::var("CHRONOS_RETREND_DAMPING_PHI").ok();
+    unsafe { std::env::set_var("CHRONOS_RETREND_DAMPING_PHI", "1.0") };
+
     let n = 200;
     let horizon = 20;
     let full: Vec<f64> = (0..n + horizon).map(|i| 100.0 + 2.5 * i as f64).collect();
@@ -79,6 +85,14 @@ fn test_pure_trend_accuracy() {
 
     let forecast = run_pipeline(train, horizon);
     let mase = compute_mase(&forecast, actual, train, 1);
+
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("CHRONOS_RETREND_DAMPING_PHI", v),
+            None => std::env::remove_var("CHRONOS_RETREND_DAMPING_PHI"),
+        }
+    }
+
     assert!(mase < 0.5, "Pure trend MASE = {mase:.3}, expected < 0.5");
 }
 
